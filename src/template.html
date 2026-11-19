@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b0726">
+<title>Balloon</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&text=/*FONTTEXT*/&display=block" rel="stylesheet">
+<style>
+  html,body{margin:0;height:100%;background:#1a1640;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  body{display:flex;align-items:center;justify-content:center}
+  canvas{display:block;touch-action:none}
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#a9c8ff;font:18px "ZCOOL KuaiLe","Chalkboard SE",cursive;letter-spacing:2px}
+</style>
+</head>
+<body>
+<div id="loading">准备气球中…</div>
+<canvas id="c"></canvas>
+<script>
+const SRC = /*SPRITES*/;
+(() => {
+'use strict';
+const DEBUG = /[?&]debug/.test(location.search);
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 360, H = 640, U = 1, DPR = 1;
+const FONT = '"ZCOOL KuaiLe","Chalkboard SE","Comic Sans MS","PingFang SC",cursive';
+
+/* palette picked from the original drawings */
+const C = {
+  ink: '#3a3c86', purple: '#4b2c82', steel: '#5a84a7', pink: '#d6487f', lilac: '#9d8fd8',
+  mint: '#74cfae', paper: '#fffcf3', paperHatch: '#dce6ff', navy: '#1f2456',
+  balloon: ['#4fc3f7', '#f5a142', '#f27ad6', '#f4e66a', '#ffffff'],
+};
+
+/* ---------- load ---------- */
+const IMG = {};
+function load() {
+  return Promise.all(Object.keys(SRC).map(n => new Promise(res => {
+    const im = new Image();
+    im.onload = () => { IMG[n] = im; res(); };
+    im.onerror = () => res();
+    im.src = SRC[n];
+  })));
+}
+function fontsReady() {
+  const go = document.fonts && document.fonts.load
+    ? Promise.all([document.fonts.load('30px "ZCOOL KuaiLe"', '继续暂停最高新纪录换人物'), document.fonts.ready])
+    : Promise.resolve();
+  return Promise.race([go.catch(() => {}), new Promise(r => setTimeout(r, 2500))]);
+}
+
+/* ---------- tiny helpers ---------- */
+const rnd = (a, b) => a + Math.random() * (b - a);
+const pick = a => a[(Math.random() * a.length) | 0];
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+function mulberry(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function canvas(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, Math.ceil(w)); c.height = Math.max(1, Math.ceil(h)); return c; }
+// a canvas sized in CSS px, rendered at device resolution
+function hiCanvas(w, h) {
+  const c = canvas(w * DPR, h * DPR); c.cssW = w; c.cssH = h;
+  const x = c.getContext('2d'); x.scale(DPR, DPR); return [c, x];
+}
+
+/* ---------- crayon kit ---------- */
+let GRAIN = null, PAPER = null, VIGNETTE = null;
+function makeGrain() {
+  // transparent tile; opaque specks + diagonal streaks = the bits of paper that show through wax
+  const c = canvas(192, 192), x = c.getContext('2d');
+  const d = x.createImageData(192, 192);
+  for (let i = 0; i < d.data.length; i += 4) {
+    const r = Math.random();
+    d.data[i] = d.data[i + 1] = d.data[i + 2] = 0;
+    d.data[i + 3] = r < 0.16 ? 120 + Math.random() * 135 : r < 0.3 ? Math.random() * 70 : 0;
+  }
+  x.putImageData(d, 0, 0);
+  x.strokeStyle = '#000'; x.lineCap = 'round';
+  for (let i = 0; i < 110; i++) {
+    const px = Math.random() * 192, py = Math.random() * 192, l = rnd(4, 14);
+    x.globalAlpha = rnd(0.25, 0.7); x.lineWidth = rnd(0.6, 1.4);
+    x.beginPath(); x.moveTo(px, py); x.lineTo(px + l * 0.45, py - l); x.stroke();
+  }
+  return c;
+}
+function makePaper() {
+  const c = canvas(256, 256), x = c.getContext('2d');
+  x.fillStyle = '#fff'; x.fillRect(0, 0, 256, 256);
+  const d = x.getImageData(0, 0, 256, 256);
+  for (let i = 0; i < d.data.length; i += 4) {
+    const v = 255 - Math.random() * Math.random() * 34;
+    d.data[i] = v; d.data[i + 1] = v; d.data[i + 2] = v - 2;
+  }
+  x.putImageData(d, 0, 0);
+  x.strokeStyle = 'rgba(120,110,150,0.10)'; x.lineCap = 'round';
+  for (let i = 0; i < 60; i++) { // paper fibres
+    const px = Math.random() * 256, py = Math.random() * 256, a = Math.random() * 6.28, l = rnd(6, 22);
+    x.lineWidth = rnd(0.4, 1); x.beginPath(); x.moveTo(px, py);
+    x.quadraticCurveTo(px + Math.cos(a) * l * 0.5 + rnd(-3, 3), py + Math.sin(a) * l * 0.5 + rnd(-3, 3), px + Math.cos(a) * l, py + Math.sin(a) * l); x.stroke();
+  }
+  return c;
+}
+function makeVignette() {
+  const c = canvas(180, 320), x = c.getContext('2d');
+  const g = x.createRadialGradient(90, 150, 60, 90, 160, 230);
+  g.addColorStop(0, 'rgba(20,20,60,0)'); g.addColorStop(1, 'rgba(20,20,60,0.2)');
+  x.fillStyle = g; x.fillRect(0, 0, 180, 320);
+  return c;
+}
+function crayonize(x, w, h, strength) {
+  x.save();
+  x.setTransform(1, 0, 0, 1, 0, 0);
+  x.globalCompositeOperation = 'destination-out';
+  x.globalAlpha = strength;
+  x.fillStyle = x.createPattern(GRAIN, 'repeat');
+  x.fillRect(0, 0, w, h);
+  x.restore();
+}
+// wobbly rounded-rect outline points (becomes a wobbly circle if r is big enough)
+function wobblyRR(cx, cy, w, h, r, amp, seed) {
+  r = Math.min(r, w / 2, h / 2);
+  const a = w - 2 * r, b = h - 2 * r, P = 2 * a + 2 * b + 2 * Math.PI * r;
+  const R = mulberry(seed), p1 = R() * 6, p2 = R() * 6, p3 = R() * 6, f = 6.283 / P;
+  const n = Math.max(24, Math.round(P / 5)), pts = [];
+  const x0 = cx - w / 2, y0 = cy - h / 2;
+  for (let i = 0; i < n; i++) {
+    let s = i / n * P, x, y;
+    const seg = [a, Math.PI * r / 2, b, Math.PI * r / 2, a, Math.PI * r / 2, b, Math.PI * r / 2];
+    let k = 0; while (k < 7 && s > seg[k]) { s -= seg[k]; k++; }
+    const q = seg[k] ? s / seg[k] : 0, ang = q * Math.PI / 2;
+    switch (k) {
+      case 0: x = x0 + r + s; y = y0; break;
+      case 1: x = x0 + w - r + Math.sin(ang) * r; y = y0 + r - Math.cos(ang) * r; break;
+      case 2: x = x0 + w; y = y0 + r + s; break;
+      case 3: x = x0 + w - r + Math.cos(ang) * r; y = y0 + h - r + Math.sin(ang) * r; break;
+      case 4: x = x0 + w - r - s; y = y0 + h; break;
+      case 5: x = x0 + r - Math.sin(ang) * r; y = y0 + h - r + Math.cos(ang) * r; break;
+      case 6: x = x0; y = y0 + h - r - s; break;
+      default: x = x0 + r - Math.cos(ang) * r; y = y0 + r - Math.sin(ang) * r;
+    }
+    const t = i / n * P;
+    x += amp * (Math.sin(t * f * 3 + p1) * 0.6 + Math.sin(t * f * 7 + p2) * 0.4);
+    y += amp * (Math.sin(t * f * 4 + p3) * 0.6 + Math.sin(t * f * 9 + p1) * 0.4);
+    pts.push([x, y]);
+  }
+  return pts;
+}
+function tracePts(x, pts) { x.beginPath(); pts.forEach((p, i) => i ? x.lineTo(p[0], p[1]) : x.moveTo(p[0], p[1])); x.closePath(); }
+function hatch(x, cx, cy, w, h, color, alpha, gap, seed) {
+  const R = mulberry(seed);
+  x.save(); x.strokeStyle = color; x.lineCap = 'round';
+  const span = w + h;
+  for (let s = -span; s < span; s += gap * (0.7 + R() * 0.7)) {
+    x.globalAlpha = alpha * (0.4 + R() * 0.6); x.lineWidth = gap * (0.25 + R() * 0.3);
+    const j = R() * 6 - 3;
+    x.beginPath(); x.moveTo(cx - w / 2 + s + j, cy + h / 2 + 4); x.lineTo(cx - w / 2 + s + h * 0.55 + j, cy - h / 2 - 4); x.stroke();
+  }
+  x.restore();
+}
+/* a crayon-filled, crayon-outlined blob: buttons, pills, paper cards */
+function crayonShape(w, h, o) {
+  const pad = (o.strokeW || 0) + 6;
+  const [c, x] = hiCanvas(w + pad * 2, h + pad * 2);
+  const cx = c.cssW / 2, cy = c.cssH / 2, seed = o.seed || 7;
+  const pts = wobblyRR(cx, cy, w, h, o.r == null ? h / 2 : o.r, o.amp == null ? 1.6 : o.amp, seed);
+  // fill layer
+  const [f, fx] = hiCanvas(c.cssW, c.cssH);
+  if (o.shadow) { // soft hand-shaded shadow under the shape
+    fx.save(); fx.translate(0, 4); fx.globalAlpha = 0.22; fx.fillStyle = C.navy; tracePts(fx, pts); fx.fill(); fx.restore();
+  }
+  fx.fillStyle = o.fill; tracePts(fx, pts); fx.fill();
+  if (o.hatch) { fx.save(); tracePts(fx, pts); fx.clip(); hatch(fx, cx, cy, w, h, o.hatch, o.hatchA || 0.55, o.gap || 5, seed + 3); fx.restore(); }
+  crayonize(fx, f.width, f.height, o.grain == null ? 0.35 : o.grain);
+  x.drawImage(f, 0, 0, c.cssW, c.cssH);
+  // outline: two slightly different passes like a real crayon
+  if (o.stroke) {
+    const [s, sx] = hiCanvas(c.cssW, c.cssH);
+    sx.strokeStyle = o.stroke; sx.lineJoin = sx.lineCap = 'round';
+    sx.lineWidth = o.strokeW; tracePts(sx, pts); sx.stroke();
+    sx.globalAlpha = 0.7; sx.lineWidth = o.strokeW * 0.7;
+    tracePts(sx, wobblyRR(cx + 0.6, cy - 0.4, w, h, o.r == null ? h / 2 : o.r, (o.amp == null ? 1.6 : o.amp) * 1.3, seed + 11)); sx.stroke();
+    crayonize(sx, s.width, s.height, 0.45);
+    x.drawImage(s, 0, 0, c.cssW, c.cssH);
+  }
+  return c;
+}
+function crayonText(str, size, color, o = {}) {
+  const meas = canvas(4, 4).getContext('2d');
+  meas.font = `${size}px ${FONT}`;
+  const tw = meas.measureText(str).width, pad = size * 0.4;
+  const [c, x] = hiCanvas(tw + pad * 2, size * 1.5 + pad);
+  x.font = `${size}px ${FONT}`; x.textAlign = 'center'; x.textBaseline = 'middle';
+  const cx = c.cssW / 2, cy = c.cssH / 2;
+  if (o.outline) { x.lineJoin = 'round'; x.strokeStyle = o.outline; x.lineWidth = size * 0.26; x.strokeText(str, cx, cy); }
+  x.fillStyle = color;
+  x.fillText(str, cx, cy);
+  x.globalAlpha = 0.55; x.fillText(str, cx + size * 0.03, cy - size * 0.02);
+  crayonize(x, c.width, c.height, o.grain == null ? 0.38 : o.grain);
+  return c;
+}
+function crayonDot(r, color, seed) {
+  return crayonShape(r * 2, r * 2, { fill: color, r, amp: r * 0.12, grain: 0.3, seed });
+}
+function crayonStar(size, color) {
+  const [c, x] = hiCanvas(size * 1.3, size * 1.3), m = c.cssW / 2;
+  x.fillStyle = color; x.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const a = i * Math.PI / 4 - Math.PI / 2, r = i % 2 ? size * 0.16 : size * 0.5;
+    i ? x.lineTo(m + Math.cos(a) * r, m + Math.sin(a) * r) : x.moveTo(m + Math.cos(a) * r, m + Math.sin(a) * r);
+  }
+  x.closePath(); x.fill(); crayonize(x, c.width, c.height, 0.3);
+  return c;
+}
+function crayonLine(len, width, color) {
+  const [c, x] = hiCanvas(width * 3, len + width * 2);
+  const g = x.createLinearGradient(0, 0, 0, len);
+  g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.5, color); g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.strokeStyle = g; x.lineCap = 'round'; x.lineWidth = width;
+  x.beginPath(); x.moveTo(width * 1.5, width); x.lineTo(width * 1.5 + rnd(-1, 1), len); x.stroke();
+  crayonize(x, c.width, c.height, 0.35);
+  return c;
+}
+/* baked sprite variants: soft shadow (depth), glow (bolt), blur (far clouds) */
+function bakeShadow(img, blur, dy, color) {
+  const pad = blur * 2 + Math.abs(dy);
+  const c = canvas(img.width + pad * 2, img.height + pad * 2), x = c.getContext('2d');
+  x.shadowColor = color; x.shadowBlur = blur; x.shadowOffsetY = dy;
+  x.drawImage(img, pad, pad);
+  return c;
+}
+function bakeBlur(img, k) {
+  const s = canvas(img.width / k, img.height / k);
+  s.getContext('2d').drawImage(img, 0, 0, s.width, s.height);
+  const c = canvas(img.width, img.height), x = c.getContext('2d');
+  x.imageSmoothingQuality = 'high'; x.drawImage(s, 0, 0, c.width, c.height);
+  return c;
+}
+function bakeInk(img, color, a) { // darker digits for light paper
+  const c = canvas(img.width, img.height), x = c.getContext('2d');
+  x.drawImage(img, 0, 0); x.globalCompositeOperation = 'source-atop';
+  x.globalAlpha = a; x.fillStyle = color; x.fillRect(0, 0, c.width, c.height);
+  return c;
+}
+
+/* auto hit-circles from alpha */
+function circlesFor(img, cell, thresh) {
+  const c = canvas(img.width, img.height), x = c.getContext('2d'); x.drawImage(img, 0, 0);
+  const d = x.getImageData(0, 0, c.width, c.height).data, out = [];
+  for (let cy = 0; cy < c.height; cy += cell) for (let cx = 0; cx < c.width; cx += cell) {
+    let on = 0, tot = 0;
+    for (let y = cy; y < Math.min(cy + cell, c.height); y += 2) for (let xx = cx; xx < Math.min(cx + cell, c.width); xx += 2) {
+      tot++; if (d[(y * c.width + xx) * 4 + 3] > 60) on++;
+    }
+    if (tot && on / tot > (thresh || 0.3)) out.push({ x: cx + cell / 2, y: cy + cell / 2, r: cell * 0.62 });
+  }
+  return out;
+}
+
+let HIT = {}, CHARS = [];
+function prepare() {
+  GRAIN = makeGrain(); PAPER = makePaper(); VIGNETTE = makeVignette();
+  const b = IMG.balloons3, g = IMG.girl;
+  const gc = canvas(b.width, 150 + g.height), gx = gc.getContext('2d');
+  gx.drawImage(b, 0, 0); gx.drawImage(g, 103 - g.width / 2, 146);
+  IMG.girlFull = gc;
+
+  HIT = {
+    kid: circlesFor(IMG.kid1, 20), girl: circlesFor(gc, 20),
+    bird_b: circlesFor(IMG.bird_b1, 22), bird_w: circlesFor(IMG.bird_w1, 20),
+    bolt: circlesFor(IMG.bolt, 12, 0.18),
+  };
+  for (let i = 1; i <= 5; i++) HIT['branch' + i] = circlesFor(IMG['branch' + i], 14, 0.28);
+
+  const shade = 'rgba(28,34,100,0.26)';
+  ['kid1', 'kid2', 'girlFull', 'kid_balloons', 'balloons3', 'fall1', 'fall2', 'girl', 'bird_b1', 'bird_b2', 'bird_w1', 'bird_w2', 'poop', 'ball',
+   'branch1', 'branch2', 'branch3', 'branch4', 'branch5', 'logo', 'btn_start', 'btn_restart', 'gameover']
+    .forEach(n => { IMG[n]._sh = bakeShadow(IMG[n], 12, 7, shade); });
+  ['cloud_blue', 'cloud_yellow', 'cloud_purple', 'cloud_dark'].forEach(n => {
+    IMG[n]._sh = bakeShadow(IMG[n], 18, 8, 'rgba(28,34,100,0.16)');
+    IMG[n]._blur = bakeBlur(IMG[n], 3.2);
+  });
+  IMG.bolt._sh = bakeShadow(bakeShadow(IMG.bolt, 18, 0, 'rgba(255,240,120,0.95)'), 6, 0, 'rgba(255,255,220,0.9)');
+  for (let i = 0; i <= 9; i++) IMG['d' + i]._ink = bakeInk(IMG['d' + i], '#2b2a6b', 0.28);
+  IMG.dM._ink = bakeInk(IMG.dM, '#2b2a6b', 0.28);
+
+  CHARS = [
+    { id: 'kid', frames: [IMG.kid1, IMG.kid2], hit: HIT.kid, balloons: IMG.kid_balloons, fall: [IMG.fall1, IMG.fall2], colors: ['#4fc3f7', '#f5a142', '#f27ad6'] },
+    { id: 'girl', frames: [gc], hit: HIT.girl, balloons: IMG.balloons3, fall: [IMG.girl], sway: true, colors: ['#f4e66a', '#5cb8f5', '#f27ad6'] },
+  ];
+}
+
+/* ---------- UI cache (baked per screen size) ---------- */
+let UI = {};
+function ui(key, make) { return UI[key] || (UI[key] = make()); }
+function bakeStatic() {
+  UI = {};
+  UI.star = crayonStar(14 * U, '#fff8d8');
+  UI.starBig = crayonStar(26 * U, '#ffe86e');
+  UI.wind = crayonLine(46 * U, 2.4 * U, 'rgba(255,255,255,0.9)');
+  UI.dots = [];
+  C.balloon.forEach((col, i) => { UI.dots.push(crayonDot(4 * U, col, i * 13 + 1)); UI.dots.push(crayonDot(6 * U, col, i * 13 + 2)); });
+}
+
+/* ---------- storage ---------- */
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('balloon_' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('balloon_' + k, JSON.stringify(v)); } catch (e) {} },
+};
+
+/* ---------- sound (ambient: never interrupts other audio) ---------- */
+let AC = null, muted = !!store.get('mute', false);
+function initAudio() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'ambient'; } catch (e) {}
+  if (muted) return;
+  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+  try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; }
+}
+function sPop() {
+  if (!AC || muted) return;
+  const t = AC.currentTime, len = 0.18;
+  const buf = AC.createBuffer(1, AC.sampleRate * len, AC.sampleRate), ch = buf.getChannelData(0);
+  for (let i = 0; i < ch.length; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / ch.length, 4);
+  const src = AC.createBufferSource(); src.buffer = buf;
+  const f = AC.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1400; f.Q.value = 0.7;
+  const gn = AC.createGain(); gn.gain.value = 0.5;
+  src.connect(f).connect(gn).connect(AC.destination); src.start(t);
+  const o = AC.createOscillator(), og = AC.createGain();
+  o.type = 'sine'; o.frequency.setValueAtTime(520, t + 0.05); o.frequency.exponentialRampToValueAtTime(140, t + 0.7);
+  og.gain.setValueAtTime(0.0001, t + 0.05); og.gain.exponentialRampToValueAtTime(0.12, t + 0.08); og.gain.exponentialRampToValueAtTime(0.0001, t + 0.75);
+  o.connect(og).connect(AC.destination); o.start(t + 0.05); o.stop(t + 0.8);
+}
+function sTick(freq, vol) {
+  if (!AC || muted) return;
+  const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'triangle'; o.frequency.value = freq;
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol || 0.08, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t + 0.3);
+}
+
+/* ---------- layout ---------- */
+function resize() {
+  const vw = window.innerWidth, vh = window.innerHeight;
+  W = Math.min(vw, Math.round(vh * 0.64)); H = vh; U = W / 360;
+  DPR = Math.min(window.devicePixelRatio || 1, 2.5);
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  stars = makeStars();
+  if (GRAIN) bakeStatic();
+  if (player) player.s = charScale(player.ch);
+}
+window.addEventListener('resize', resize);
+
+function drawSprite(img, x, y, s, flip, rot, alpha, variant) {
+  const im = variant === 'raw' ? img : variant ? (img[variant] || img) : (img._sh || img);
+  ctx.save();
+  if (alpha != null) ctx.globalAlpha = alpha;
+  ctx.translate(x, y);
+  if (rot) ctx.rotate(rot);
+  ctx.scale(flip ? -s : s, s);
+  ctx.drawImage(im, -im.width / 2, -im.height / 2);
+  ctx.restore();
+}
+function drawUI(c, x, y, s, alpha) { // baked hi-dpi canvas, centered
+  s = s || 1;
+  ctx.save(); if (alpha != null) ctx.globalAlpha = alpha;
+  ctx.drawImage(c, x - c.cssW * s / 2, y - c.cssH * s / 2, c.cssW * s, c.cssH * s);
+  ctx.restore();
+}
+function worldCircles(list, img, x, y, s, flip, k) {
+  const out = [];
+  for (const c of list) out.push({ x: x + (c.x - img.width / 2) * (flip ? -1 : 1) * s, y: y + (c.y - img.height / 2) * s, r: c.r * s * k });
+  return out;
+}
+function hits(A, B) {
+  for (const a of A) for (const b of B) { const dx = a.x - b.x, dy = a.y - b.y, rr = a.r + b.r; if (dx * dx + dy * dy < rr * rr) return true; }
+  return false;
+}
+
+/* ---------- game state ---------- */
+let state = 'title';          // title | play | pause | fall | over
+let charIdx = store.get('char', 0) | 0;
+let best = store.get('best', 0) | 0;
+let cam = 0, t = 0, playT = 0, climb = 0;
+let player = null, obs = [], decos = [], fx = [], parts = [], winds = [], stars = [];
+let nextWy = 0, nextDeco = 0, lastMeter = 0, windAcc = 0;
+let fallT = 0, overT = 0, newBest = false, shakeT = 0, flashT = 0, banner = null, bannerIdx = 0;
+const BANNERS = [[12, '小鸟出没！'], [55, '小心鸟屎！'], [200, '云会打雷哦'], [600, '飞进太空啦'], [1000, '一千米！好厉害'], [1500, '还在飞！']];
+const ZONES = [[15, 'bird_w1'], [200, 'cloud_dark'], [620, 'ball']];
+const TOPM = 1500;
+
+const meters = () => Math.floor(cam / U / 10);
+function makeStars() {
+  const s = [];
+  for (let i = 0; i < 38; i++) s.push({ x: Math.random(), y: Math.random(), k: rnd(0.35, 1), p: Math.random() * 6 });
+  return s;
+}
+function charScale(ch) { return (122 * U) / ch.frames[0].height; }
+
+function reset() {
+  cam = 0; playT = 0; climb = 0; obs = []; fx = []; parts = []; winds = [];
+  const ch = CHARS[charIdx];
+  player = { x: W / 2, tx: W / 2, y: H * 0.64, vx: 0, ch, s: charScale(ch) };
+  nextWy = H + 160 * U; lastMeter = 0; newBest = false; shakeT = 0; flashT = 0; banner = null; bannerIdx = 0;
+}
+
+/* ---------- spawning ---------- */
+function spawnRow(wy) {
+  const m = wy / U / 10, opts = [];
+  if (m < 180) opts.push(['branch', m < 60 ? 6 : 3]);
+  if (m < 120 && m > 30) opts.push(['branch2', 2]);
+  if (m > 15) opts.push(['bird_w', 2]);
+  if (m > 50) opts.push(['bird_b', m > 150 ? 3 : 2]);
+  if (m > 200) opts.push(['storm', m > 500 ? 3 : 2]);
+  if (m > 620) opts.push(['meteor', m > 900 ? 3 : 1.5]);
+  let tot = 0; for (const o of opts) tot += o[1];
+  let r = Math.random() * tot, kind = opts[0][0];
+  for (const o of opts) { if ((r -= o[1]) < 0) { kind = o[0]; break; } }
+  if (kind === 'branch') addBranch(wy, Math.random() < 0.5 ? 'L' : 'R', rnd(0.36, 0.6));
+  else if (kind === 'branch2') { const a = rnd(0.24, 0.34); addBranch(wy, 'L', a); addBranch(wy + rnd(-20, 20) * U, 'R', 0.6 - a + rnd(-0.04, 0.02)); }
+  else if (kind === 'bird_w' || kind === 'bird_b') addBird(wy, kind);
+  else if (kind === 'storm') addStorm(wy);
+  else if (kind === 'meteor') addMeteor();
+}
+function addBranch(wy, side, frac) {
+  const n = 1 + ((Math.random() * 5) | 0), img = IMG['branch' + n];
+  const len = W * frac, s = len / img.width, flip = side === 'R';
+  obs.push({ type: 'branch', img, hit: HIT['branch' + n], wy, x: side === 'L' ? len / 2 : W - len / 2, s, flip, rot: rnd(-0.08, 0.08) * (flip ? -1 : 1) });
+}
+function addBird(wy, kind) {
+  const brown = kind === 'bird_b', dir = Math.random() < 0.5 ? 1 : -1;
+  const s = (brown ? 92 : 60) * U / (brown ? IMG.bird_b1.width : IMG.bird_w1.width);
+  const sp = (brown ? rnd(55, 105) : rnd(80, 150)) * U * (1 + Math.min(meters() / 1500, 0.6));
+  obs.push({ type: 'bird', brown, frames: brown ? [IMG.bird_b1, IMG.bird_b2] : [IMG.bird_w1, IMG.bird_w2],
+    hit: brown ? HIT.bird_b : HIT.bird_w, wy, x: dir > 0 ? -60 * U : W + 60 * U, vx: dir * sp, s,
+    flip: dir > 0, ph: Math.random() * 6, dropped: !brown || Math.random() < 0.25, bob: rnd(4, 10) * U });
+}
+function addStorm(wy) {
+  const img = pick([IMG.cloud_blue, IMG.cloud_yellow, IMG.cloud_purple]), s = (W * rnd(0.4, 0.52)) / img.width, per = rnd(2.6, 3.8);
+  obs.push({ type: 'storm', img, wy, x: rnd(0.22, 0.78) * W, s, per, ph: rnd(0, per), boltDx: 0, striking: false, mode: 'calm' });
+}
+function addMeteor() {
+  const img = IMG.ball, s = rnd(42, 60) * U / img.width;
+  obs.push({ type: 'meteor', img, wy: cam + H + 80 * U, x: rnd(0.12, 0.88) * W, vx: rnd(-50, 50) * U, vy: -rnd(110, 190) * U, s, rot: 0, vr: rnd(-3, 3) });
+}
+function addPoop(x, wy) { obs.push({ type: 'poop', img: IMG.poop, x, wy, vy: -rnd(150, 200) * U, s: 28 * U / IMG.poop.width, rot: 0 }); }
+function addDeco(wy) {
+  const m = cam / U / 10;
+  const img = pick([IMG.cloud_blue, IMG.cloud_blue, IMG.cloud_yellow, IMG.cloud_purple]);
+  const far = Math.random() < 0.55; // far clouds: smaller, softer, slower
+  const par = far ? 0.32 : 0.55;
+  wy = wy - cam * 0.32 + cam * par; // keep spawn just above screen whatever its parallax
+  decos.push({ img, wy, x: rnd(-0.1, 1.1) * W, s: W * (far ? rnd(0.2, 0.32) : rnd(0.32, 0.48)) / img.width, par,
+    a: (m > 900 ? 0.45 : far ? rnd(0.45, 0.6) : rnd(0.6, 0.78)), far, flip: Math.random() < 0.5, drift: rnd(-6, 6) * U });
+  decos.sort((a, b) => a.par - b.par);
+}
+function burst(x, y, n, spread) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, v = rnd(60, spread) * U;
+    parts.push({ img: pick(UI.dots), x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 60 * U, life: rnd(0.6, 1.1), age: 0, rot: rnd(0, 6) });
+  }
+}
+
+/* ---------- UI layout ---------- */
+const R = (x, y, w, h) => ({ x, y, w, h });
+function inR(p, r, slop) { slop = slop || 8 * U; return Math.abs(p.x - r.x) < r.w / 2 + slop && Math.abs(p.y - r.y) < r.h / 2 + slop; }
+function titleLayout() {
+  const cw = W * 0.38, chh = Math.min(H * 0.25, 176 * U);
+  const bi = IMG.btn_start, bw = W * 0.52, bs = bw / bi.width;
+  return {
+    logo: { x: W / 2, y: H * 0.15, s: (W * 0.76) / IMG.logo.width },
+    sub: { x: W / 2, y: H * 0.15 + 74 * U },
+    cards: [R(W * 0.28, H * 0.46, cw, chh), R(W * 0.72, H * 0.46, cw, chh)],
+    btn: R(W / 2, H * 0.68, bw, bi.height * bs), bs,
+    best: R(W / 2, H * 0.68 + 66 * U, 150 * U, 40 * U),
+    sound: R(W - 34 * U, 36 * U, 40 * U, 40 * U),
+  };
+}
+function overLayout() {
+  const ch = Math.min(H * 0.4, 310 * U), cy = H * 0.4;
+  const bi = IMG.btn_restart, bw = W * 0.52, bs = bw / bi.width;
+  return { card: R(W / 2, cy, W * 0.84, ch), btn: R(W / 2, cy + ch / 2 + 52 * U, bw, bi.height * bs), bs,
+    home: R(W / 2, cy + ch / 2 + 112 * U, 130 * U, 42 * U) };
+}
+function pauseLayout() {
+  return { card: R(W / 2, H * 0.45, W * 0.72, 250 * U), go: R(W / 2, H * 0.45 + 10 * U, 160 * U, 50 * U),
+    home: R(W / 2, H * 0.45 + 74 * U, 160 * U, 46 * U), sound: R(W / 2 + W * 0.36 - 30 * U, H * 0.45 - 95 * U, 40 * U, 40 * U) };
+}
+const pauseBtn = () => R(32 * U, 44 * U, 42 * U, 42 * U);
+
+/* baked UI pieces */
+const paperCard = (w, h, seed) => crayonShape(w, h, { fill: C.paper, hatch: C.paperHatch, hatchA: 0.6, gap: 6 * U, stroke: '#8592cf', strokeW: 3 * U, r: 22 * U, amp: 2 * U, shadow: true, grain: 0.18, seed });
+const pill = (w, h, fill, hatchC, seed) => crayonShape(w, h, { fill, hatch: hatchC, hatchA: 0.5, gap: 5 * U, r: h / 2, amp: 1.4 * U, shadow: true, grain: 0.32, seed });
+function textPill(label, w, h, fill, hatchC, seed, color) {
+  return ui('tp' + label + fill, () => {
+    const p = pill(w, h, fill, hatchC, seed), tx = crayonText(label, h * 0.5, color || '#fffaf2', { grain: 0.25 });
+    const [c, x] = hiCanvas(p.cssW, p.cssH);
+    x.drawImage(p, 0, 0, p.cssW, p.cssH);
+    x.drawImage(tx, (p.cssW - tx.cssW) / 2, (p.cssH - tx.cssH) / 2 - 2 * U, tx.cssW, tx.cssH);
+    return c;
+  });
+}
+function iconBtn(kind) {
+  return ui('ib' + kind, () => {
+    const s = 40 * U, base = crayonShape(s, s, { fill: 'rgba(255,252,243,0.92)', hatch: C.paperHatch, hatchA: 0.6, gap: 5 * U, stroke: C.lilac, strokeW: 2.6 * U, r: s / 2, amp: 1.2 * U, shadow: true, grain: 0.2, seed: kind.length * 5 });
+    const [c, x] = hiCanvas(base.cssW, base.cssH);
+    x.drawImage(base, 0, 0, base.cssW, base.cssH);
+    const m = c.cssW / 2, k = s / 40;
+    x.strokeStyle = x.fillStyle = C.purple; x.lineCap = x.lineJoin = 'round'; x.lineWidth = 3.2 * k;
+    if (kind === 'pause') { x.beginPath(); x.moveTo(m - 5 * k, m - 8 * k); x.lineTo(m - 5 * k, m + 8 * k); x.moveTo(m + 5 * k, m - 8 * k); x.lineTo(m + 5 * k, m + 8 * k); x.stroke(); }
+    else {
+      x.beginPath(); x.moveTo(m - 10 * k, m - 4 * k); x.lineTo(m - 5 * k, m - 4 * k); x.lineTo(m + 1 * k, m - 10 * k); x.lineTo(m + 1 * k, m + 10 * k); x.lineTo(m - 5 * k, m + 4 * k); x.lineTo(m - 10 * k, m + 4 * k); x.closePath(); x.fill();
+      if (kind === 'sound') { x.beginPath(); x.arc(m + 2 * k, m, 6 * k, -0.9, 0.9); x.stroke(); x.beginPath(); x.arc(m + 2 * k, m, 11 * k, -0.8, 0.8); x.stroke(); }
+      else { x.strokeStyle = C.pink; x.beginPath(); x.moveTo(m + 5 * k, m - 6 * k); x.lineTo(m + 13 * k, m + 6 * k); x.moveTo(m + 13 * k, m - 6 * k); x.lineTo(m + 5 * k, m + 6 * k); x.stroke(); }
+    }
+    crayonize(x, c.width, c.height, 0.22);
+    return c;
+  });
+}
+const label = (txt, size, color, outline) => ui('tx' + txt + size + color + (outline || ''), () => crayonText(txt, size, color, { outline }));
+
+/* ---------- input ---------- */
+let drag = null;
+const keys = {};
+function localPt(e) { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const p = localPt(e);
+  initAudio();
+  if (state === 'title') return titleTap(p);
+  if (state === 'over') return overTap(p);
+  if (state === 'pause') return pauseTap(p);
+  if (state === 'play') {
+    if (inR(p, pauseBtn(), 6 * U)) return pauseGame();
+    drag = { id: e.pointerId, px: p.x, sx: player.tx };
+    try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  }
+});
+cv.addEventListener('pointermove', e => {
+  if (!drag || e.pointerId !== drag.id || state !== 'play') return;
+  player.tx = clamp(drag.sx + (localPt(e).x - drag.px) * 1.25, W * 0.08, W * 0.92);
+});
+const endDrag = e => { if (drag && e.pointerId === drag.id) drag = null; };
+cv.addEventListener('pointerup', endDrag); cv.addEventListener('pointercancel', endDrag);
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (e.key === ' ' || e.key === 'Enter') {
+    initAudio();
+    if (state === 'title' || (state === 'over' && overT > 0.6)) startGame();
+    else if (state === 'pause') state = 'play';
+  }
+  if ((e.key === 'Escape' || e.key === 'p') && (state === 'play' || state === 'pause')) state === 'play' ? pauseGame() : (state = 'play');
+});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+function toggleSound() { muted = !muted; store.set('mute', muted); if (!muted) { initAudio(); sTick(700); } }
+function titleTap(p) {
+  const L = titleLayout();
+  if (inR(p, L.sound)) return toggleSound();
+  L.cards.forEach((r, i) => { if (inR(p, r, 0)) { if (charIdx !== i) sTick(660); charIdx = i; store.set('char', i); } });
+  if (inR(p, L.btn)) startGame();
+}
+function overTap(p) {
+  if (overT < 0.6) return;
+  const L = overLayout();
+  if (inR(p, L.btn)) startGame();
+  else if (inR(p, L.home)) { state = 'title'; cam = 0; sTick(520); }
+}
+function pauseTap(p) {
+  const L = pauseLayout();
+  if (inR(p, L.sound)) return toggleSound();
+  if (inR(p, L.go)) { state = 'play'; sTick(700); }
+  else if (inR(p, L.home)) { state = 'title'; cam = 0; sTick(520); }
+}
+function pauseGame() { if (state === 'play') { state = 'pause'; drag = null; sTick(500); } }
+function startGame() { sTick(780); reset(); state = 'play'; }
+
+/* ---------- update ---------- */
+function update(dt) {
+  if (state === 'pause') return;
+  t += dt;
+  shakeT = Math.max(0, shakeT - dt); flashT = Math.max(0, flashT - dt);
+  if (state === 'play') {
+    playT += dt;
+    climb = (95 + Math.min(playT * 2.4, 160)) * U;
+    cam += climb * dt;
+    const kd = (keys.ArrowRight || keys.d || keys.D ? 1 : 0) - (keys.ArrowLeft || keys.a || keys.A ? 1 : 0);
+    if (kd) player.tx = clamp(player.tx + kd * 330 * U * dt, W * 0.08, W * 0.92);
+    const prevX = player.x, maxStep = 620 * U * dt;
+    player.x += clamp((player.tx - player.x) * Math.min(1, dt * 12), -maxStep, maxStep);
+    player.vx = (player.x - prevX) / Math.max(dt, 1e-4);
+    while (nextWy < cam + H + 140 * U) {
+      spawnRow(nextWy);
+      nextWy += rnd(150, 235) * U * Math.max(0.62, 1 - (nextWy / U / 10) / 1800);
+    }
+    const mm = meters();
+    if (Math.floor(mm / 100) > Math.floor(lastMeter / 100)) sTick(880 + Math.min(mm, 2000) / 5, 0.05);
+    lastMeter = mm;
+    if (bannerIdx < BANNERS.length && mm >= BANNERS[bannerIdx][0]) { banner = { img: label(BANNERS[bannerIdx][1], 26 * U, C.pink, '#fffaf2'), age: 0 }; bannerIdx++; }
+    // wind streaks sell the speed
+    windAcc += dt * (climb / U) * 0.045;
+    while (windAcc > 1) { windAcc--; winds.push({ x: rnd(0.04, 0.96) * W, y: -40 * U, k: rnd(0.6, 1.2), a: rnd(0.25, 0.55) }); }
+  } else if (state === 'fall') {
+    fallT += dt; climb *= Math.pow(0.05, dt); cam += climb * dt;
+    player.fvy += 900 * U * dt; player.y += player.fvy * dt; player.rot += player.vr * dt;
+    if (fallT > 1.5) { state = 'over'; overT = 0; }
+  } else if (state === 'over') overT += dt;
+  else if (state === 'title') { cam += 18 * U * dt; if (cam > 600 * U) cam = 0; }
+
+  if (banner) { banner.age += dt; if (banner.age > 2.4) banner = null; }
+  for (const w of winds) w.y += (climb * 1.7 + 120 * U) * w.k * dt;
+  if (state !== 'play') for (const w of winds) w.a *= Math.pow(0.02, dt);
+  winds = winds.filter(w => w.y < H + 60 * U && w.a > 0.02);
+
+  // parallax clouds
+  const pcam = cam * 0.32;
+  if (nextDeco < pcam - 100 * U) nextDeco = pcam;
+  while (nextDeco < pcam + H + 200 * U) {
+    if (Math.random() < (cam / U / 10 > 1000 ? 0.25 : 0.75)) addDeco(nextDeco);
+    nextDeco += rnd(90, 180) * U;
+  }
+  for (const d of decos) d.x += d.drift * dt;
+  decos = decos.filter(d => H - (d.wy - cam * d.par) < H + 220 * U);
+
+  for (const o of obs) {
+    if (o.type === 'bird') {
+      o.x += o.vx * dt;
+      if (!o.dropped && state === 'play') {
+        const sy = H - (o.wy - cam);
+        if (Math.abs(o.x - player.x) < 26 * U && sy < player.y - 90 * U && sy > 0) { o.dropped = true; addPoop(o.x, o.wy - 10 * U); }
+      }
+    } else if (o.type === 'poop') { o.wy += o.vy * dt; o.rot = Math.sin(t * 6 + o.x) * 0.15; }
+    else if (o.type === 'meteor') { o.wy += o.vy * dt; o.x += o.vx * dt; o.rot += o.vr * dt; }
+    else if (o.type === 'storm') {
+      const q = (t + o.ph) % o.per, e = o.per - q, strike = e < 0.4;
+      if (strike && !o.striking) {
+        o.boltDx = rnd(-0.22, 0.22) * o.img.width * o.s;
+        const sy = H - (o.wy - cam);
+        if (sy > -40 * U && sy < H) { flashT = 0.14; if (state === 'play') sTick(180); }
+      }
+      o.striking = strike;
+      o.mode = strike || e < 0.75 ? 'dark' : e < 1.35 ? ((q * 14 | 0) % 2 ? 'dark' : 'flash') : 'calm';
+    }
+  }
+  obs = obs.filter(o => {
+    if (H - (o.wy - cam) > H + 260 * U) return false;
+    if (o.type === 'bird' && (o.x < -160 * U || o.x > W + 160 * U) && Math.sign(o.vx) === Math.sign(o.x - W / 2)) return false;
+    return true;
+  });
+  for (const f of fx) { f.y -= f.vy * dt; f.x += Math.sin(t * 2 + f.ph) * 20 * U * dt; f.rot = Math.sin(t * 1.5 + f.ph) * 0.15; }
+  fx = fx.filter(f => f.y > -300 * U);
+  for (const p of parts) { p.age += dt; p.vy += 260 * U * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.98; }
+  parts = parts.filter(p => p.age < p.life);
+
+  if (state === 'play') collide();
+}
+
+function playerCircles() { const p = player; return worldCircles(p.ch.hit, p.ch.frames[0], p.x, p.y, p.s, false, 0.74); }
+function boltGeom(o, sy) { const s = (150 * U) / IMG.bolt.height; return { x: o.x + o.boltDx, y: sy + o.img.height * o.s * 0.2 + IMG.bolt.height * s / 2, s }; }
+function obstacleCircles(o, sy) {
+  if (o.type === 'branch') {
+    const cs = worldCircles(o.hit, o.img, o.x, sy, o.s, o.flip, 0.82), c = Math.cos(o.rot), s = Math.sin(o.rot);
+    return cs.map(q => ({ x: o.x + (q.x - o.x) * c - (q.y - sy) * s, y: sy + (q.x - o.x) * s + (q.y - sy) * c, r: q.r }));
+  }
+  if (o.type === 'bird') return worldCircles(o.hit, o.frames[0], o.x, sy + Math.sin(t * 3 + o.ph) * o.bob, o.s, o.flip, 0.8);
+  if (o.type === 'poop') return [{ x: o.x, y: sy, r: o.img.width * o.s * 0.36 }];
+  if (o.type === 'meteor') return [{ x: o.x, y: sy, r: o.img.width * o.s * 0.43 }];
+  if (o.type === 'storm' && o.striking) { const b = boltGeom(o, sy); return worldCircles(HIT.bolt, IMG.bolt, b.x, b.y, b.s, false, 1.1); }
+  return [];
+}
+function collide() {
+  const P = playerCircles(), ph = player.ch.frames[0].height * player.s;
+  for (const o of obs) {
+    const sy = H - (o.wy - cam);
+    if (Math.abs(sy - player.y) > ph / 2 + 220 * U) continue;
+    if (hits(P, obstacleCircles(o, sy))) { die(); return; }
+  }
+}
+function die() {
+  sPop(); state = 'fall'; fallT = 0; shakeT = 0.35;
+  const p = player, ch = p.ch, img = ch.frames[0];
+  const by = p.y - img.height * p.s / 2 + ch.balloons.height * p.s / 2;
+  fx.push({ img: ch.balloons, x: p.x, y: by, s: p.s, vy: 160 * U, ph: Math.random() * 6, rot: 0 });
+  burst(p.x, by, 16, 220);
+  p.fvy = -160 * U; p.rot = 0; p.vr = (Math.random() < 0.5 ? -1 : 1) * rnd(3, 5);
+  p.y += img.height * p.s * 0.22;
+  const m = meters();
+  if (m > best) { best = m; newBest = true; store.set('best', best); }
+}
+
+/* ---------- draw ---------- */
+function drawSky() {
+  const sky = IMG.sky, m = cam / U / 10, p = clamp(m / 1300, 0, 1);
+  const s = W / sky.width, winH = Math.min(H / s, sky.height);
+  ctx.drawImage(sky, 0, (sky.height - winH) * (1 - p), sky.width, winH, 0, 0, W, H);
+  const sa = clamp((m - 700) / 500, 0, 1);
+  if (sa > 0) for (const st of stars) {
+    const y = (st.y * H + cam * 0.06 * st.k) % H;
+    drawUI(UI.star, st.x * W, y, st.k * (0.8 + 0.25 * Math.sin(t * 2.2 + st.p)), sa * (0.5 + 0.45 * Math.sin(t * 1.7 + st.p)));
+  }
+}
+function drawDecos() {
+  for (const d of decos) drawSprite(d.img, d.x, H - (d.wy - cam * d.par), d.s, d.flip, 0, d.a, d.far ? '_blur' : '_sh');
+}
+function drawObstacles() {
+  for (const o of obs) {
+    const sy = H - (o.wy - cam);
+    if (sy < -300 * U || sy > H + 300 * U) continue;
+    if (o.type === 'branch') drawSprite(o.img, o.x, sy, o.s, o.flip, o.rot);
+    else if (o.type === 'bird') drawSprite(o.frames[((t + o.ph) * (o.brown ? 5 : 7) | 0) % 2], o.x, sy + Math.sin(t * 3 + o.ph) * o.bob, o.s, o.flip, Math.sin(t * 3 + o.ph) * 0.06);
+    else if (o.type === 'poop' || o.type === 'meteor') drawSprite(o.img, o.x, sy, o.s, false, o.rot);
+    else if (o.type === 'storm') {
+      if (o.striking) {
+        const b = boltGeom(o, sy);
+        drawSprite(IMG.bolt, b.x, b.y, b.s, (t * 20 | 0) % 2 === 0);
+      }
+      if (o.mode === 'calm') drawSprite(o.img, o.x, sy, o.s);
+      else if (o.mode === 'flash') {
+        drawSprite(o.img, o.x, sy, o.s);
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; drawSprite(o.img, o.x, sy, o.s, false, 0, 0.35, 'raw'); ctx.restore();
+      } else {
+        const jx = o.striking ? 0 : Math.sin(t * 60) * 1.8 * U;
+        drawSprite(IMG.cloud_dark, o.x + jx, sy, o.s * o.img.width / IMG.cloud_dark.width);
+      }
+    }
+  }
+}
+function drawPlayer() {
+  const p = player, ch = p.ch;
+  if (state === 'play' || state === 'pause') {
+    const f = ch.frames[(t * 3 | 0) % ch.frames.length];
+    const rot = clamp(p.vx * 0.0006 / U, -0.22, 0.22) + (ch.sway ? Math.sin(t * 2.2) * 0.05 : 0);
+    ctx.save();
+    ctx.translate(p.x, p.y); ctx.rotate(-rot); ctx.translate(-p.x, -p.y);
+    drawSprite(f, p.x, p.y + Math.sin(t * 2.6) * 3 * U, p.s);
+    ctx.restore();
+  } else if (state === 'fall' || state === 'over') {
+    const f = ch.fall[(t * 6 | 0) % ch.fall.length];
+    if (p.y < H + 200 * U) drawSprite(f, p.x, p.y, ch.id === 'kid' ? p.s * 1.05 : p.s * 0.95, false, p.rot);
+  }
+  for (const f of fx) drawSprite(f.img, f.x, f.y, f.s, false, f.rot);
+  for (const q of parts) drawUI(q.img, q.x, q.y, 1, clamp(1 - q.age / q.life, 0, 1));
+}
+function drawWinds() { for (const w of winds) drawUI(UI.wind, w.x, w.y, w.k, w.a); }
+function numberWidth(n, h, withM) {
+  let tw = 0; for (const c of String(n)) tw += IMG['d' + c].width * h / 60 + U;
+  return tw + (withM ? IMG.dM.width * h / 60 + 6 * U : 0);
+}
+function drawNumber(n, cx, cy, h, withM, alpha, ink) {
+  const parts = []; for (const c of String(n)) parts.push(IMG['d' + c]);
+  if (withM) parts.push(IMG.dM);
+  const sc = h / 60; let x = cx - numberWidth(n, h, withM) / 2;
+  ctx.save(); if (alpha != null) ctx.globalAlpha = alpha;
+  parts.forEach((im, i) => {
+    if (withM && i === parts.length - 1) x += 6 * U;
+    const src = ink ? im._ink : im;
+    ctx.drawImage(src, x, cy - im.height * sc / 2, im.width * sc, im.height * sc);
+    x += im.width * sc + U;
+  });
+  ctx.restore();
+}
+function drawPaper() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = 0.32;
+  ctx.fillStyle = ctx.createPattern(PAPER, 'repeat'); ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.drawImage(VIGNETTE, 0, 0, W, H);
+  ctx.restore();
+}
+
+function drawTitle() {
+  const L = titleLayout();
+  drawSprite(IMG.logo, L.logo.x, L.logo.y + Math.sin(t * 1.6) * 4 * U, L.logo.s, false, Math.sin(t * 1.1) * 0.02);
+  drawUI(label('牵着气球，一直往上飞', 17 * U, C.ink, 'rgba(255,252,243,0.85)'), L.sub.x, L.sub.y);
+  L.cards.forEach((r, i) => {
+    const sel = i === charIdx, ch = CHARS[i];
+    const card = ui('card' + i + sel, () => crayonShape(r.w, r.h, { fill: sel ? C.paper : 'rgba(255,252,243,0.62)', hatch: sel ? '#ffd8ea' : C.paperHatch, hatchA: 0.6, gap: 6 * U,
+      stroke: sel ? C.pink : '#a3acd8', strokeW: (sel ? 3.6 : 2.4) * U, r: 20 * U, amp: 1.8 * U, shadow: sel, grain: 0.2, seed: 20 + i }));
+    const lift = sel ? Math.sin(t * 2.4) * 3 * U - 3 * U : 0;
+    drawUI(card, r.x, r.y + lift, 1, sel ? 1 : 0.85);
+    const im = ch.frames[(t * 3 | 0) % ch.frames.length], s = (r.h * 0.8) / im.height;
+    drawSprite(im, r.x, r.y + lift + Math.sin(t * 2 + i * 2) * 3 * U, s, false, Math.sin(t * 1.8 + i) * 0.05, sel ? 1 : 0.55);
+    if (sel) drawUI(UI.starBig, r.x + r.w / 2 - 10 * U, r.y - r.h / 2 + 8 * U + lift, 1 + Math.sin(t * 4) * 0.08, 1);
+  });
+  drawSprite(IMG.btn_start, L.btn.x, L.btn.y + Math.sin(t * 3) * 2 * U, L.bs);
+  if (best > 0) {
+    drawUI(ui('bestpill', () => pill(L.best.w, L.best.h, 'rgba(255,252,243,0.85)', C.paperHatch, 31)), L.best.x, L.best.y);
+    const lb = label('最高', 15 * U, C.ink), nw = numberWidth(best, 22 * U, true), tot = lb.cssW * 0.8 + nw;
+    drawUI(lb, L.best.x - tot / 2 + lb.cssW * 0.4, L.best.y - 1 * U);
+    drawNumber(best, L.best.x - tot / 2 + lb.cssW * 0.8 + nw / 2, L.best.y, 22 * U, true, 1, true);
+  }
+  drawUI(iconBtn(muted ? 'mute' : 'sound'), L.sound.x, L.sound.y);
+}
+function drawHUD() {
+  const m = meters(), w = numberWidth(m, 30 * U, true) + 34 * U, y = 44 * U;
+  const p = ui('hud' + String(m).length, () => pill(w, 46 * U, 'rgba(255,252,243,0.9)', C.paperHatch, 41));
+  drawUI(p, W / 2, y);
+  drawNumber(m, W / 2, y, 30 * U, true, 1, true);
+  drawUI(iconBtn('pause'), pauseBtn().x, pauseBtn().y);
+  drawAltBar();
+  if (banner) {
+    const a = banner.age, sc = a < 0.25 ? 0.6 + a / 0.25 * 0.4 + Math.sin(a / 0.25 * 3.14) * 0.15 : 1;
+    drawUI(banner.img, W / 2, H * 0.27 - Math.min(a, 0.3) * 20 * U, sc, a > 1.9 ? clamp((2.4 - a) / 0.5, 0, 1) : 1);
+  }
+}
+function drawAltBar() {
+  const x = W - 14 * U, top = H * 0.22, bot = H * 0.8, yAt = m => bot - (bot - top) * clamp(m / TOPM, 0, 1);
+  const bar = ui('altbar', () => {
+    const [c, g] = hiCanvas(12 * U, bot - top + 12 * U);
+    g.strokeStyle = 'rgba(255,252,243,0.8)'; g.lineCap = 'round'; g.lineWidth = 3.4 * U;
+    g.beginPath(); g.moveTo(6 * U, 6 * U); for (let yy = 6 * U; yy < c.cssH - 6 * U; yy += 8 * U) g.lineTo(6 * U + rnd(-0.6, 0.6) * U, yy); g.lineTo(6 * U, c.cssH - 6 * U); g.stroke();
+    crayonize(g, c.width, c.height, 0.4); return c;
+  });
+  ctx.save(); ctx.globalAlpha = 0.75; drawUI(bar, x, (top + bot) / 2); ctx.restore();
+  for (const [m, n] of ZONES) {
+    const im = IMG[n], s = (n === 'branch1' ? 26 : 22) * U / Math.max(im.width, im.height);
+    drawSprite(im, x - 6 * U, yAt(m), s, n === 'bird_w1', 0, meters() >= m ? 1 : 0.55, 'raw');
+  }
+  if (best > 0) { ctx.save(); ctx.strokeStyle = C.pink; ctx.lineWidth = 2.4 * U; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(x - 7 * U, yAt(best)); ctx.lineTo(x + 7 * U, yAt(best)); ctx.stroke(); ctx.restore(); }
+  const b = player.ch.balloons, s = 30 * U / b.height;
+  drawSprite(b, x - 2 * U, yAt(meters()) - 8 * U, s, false, Math.sin(t * 2) * 0.1, 1, 'raw');
+}
+function drawPause() {
+  ctx.save(); ctx.fillStyle = 'rgba(31,36,86,0.35)'; ctx.fillRect(0, 0, W, H); ctx.restore();
+  const L = pauseLayout();
+  drawUI(ui('pausecard', () => paperCard(L.card.w, L.card.h, 51)), L.card.x, L.card.y);
+  drawUI(label('暂停一下', 30 * U, C.purple), W / 2, L.card.y - 78 * U);
+  drawUI(textPill('继续', L.go.w, L.go.h, C.purple, '#7a5ab8', 61), L.go.x, L.go.y);
+  drawUI(textPill('回主页', L.home.w, L.home.h, C.steel, '#8fb1cc', 62), L.home.x, L.home.y);
+  drawUI(iconBtn(muted ? 'mute' : 'sound'), L.sound.x, L.sound.y);
+}
+function drawOver() {
+  const a = clamp(overT / 0.4, 0, 1), L = overLayout(), ease = 1 - Math.pow(1 - a, 3);
+  ctx.save(); ctx.globalAlpha = a * 0.3; ctx.fillStyle = C.navy; ctx.fillRect(0, 0, W, H); ctx.restore();
+  const cy = L.card.y + (1 - ease) * 40 * U, top = cy - L.card.h / 2;
+  drawUI(ui('overcard', () => paperCard(L.card.w, L.card.h, 71)), L.card.x, cy, 1, a);
+  drawSprite(IMG.gameover, W / 2, top + L.card.h * 0.2, (W * 0.5) / IMG.gameover.width, false, Math.sin(t * 1.5) * 0.03, a);
+  drawNumber(lastMeter, W / 2, top + L.card.h * 0.52, 54 * U, true, a, true);
+  if (newBest) {
+    const r = ui('nb', () => pill(150 * U, 38 * U, C.pink, '#f39ac0', 81));
+    drawUI(r, W / 2, top + L.card.h * 0.8, 1 + Math.sin(t * 5) * 0.03, a);
+    drawUI(label('新纪录！', 20 * U, '#fffaf2'), W / 2, top + L.card.h * 0.8 - 2 * U, 1, a);
+    drawUI(UI.starBig, W / 2 - 86 * U, top + L.card.h * 0.8, 0.9 + Math.sin(t * 4) * 0.1, a);
+    drawUI(UI.starBig, W / 2 + 86 * U, top + L.card.h * 0.8, 0.9 + Math.sin(t * 4 + 1) * 0.1, a);
+  } else if (best > 0) {
+    const lb = label('最高', 16 * U, C.ink), nw = numberWidth(best, 24 * U, true), tot = lb.cssW * 0.8 + nw, y = top + L.card.h * 0.8;
+    drawUI(lb, W / 2 - tot / 2 + lb.cssW * 0.4, y - 1 * U, 1, a);
+    drawNumber(best, W / 2 - tot / 2 + lb.cssW * 0.8 + nw / 2, y, 24 * U, true, a, true);
+  }
+  if (overT > 0.6) {
+    const b = clamp((overT - 0.6) / 0.3, 0, 1);
+    drawSprite(IMG.btn_restart, L.btn.x, L.btn.y + Math.sin(t * 3) * 2 * U, L.bs, false, 0, b);
+    drawUI(textPill('换人物', L.home.w, L.home.h, 'rgba(255,252,243,0.92)', C.paperHatch, 63, C.ink), L.home.x, L.home.y, 1, b);
+  }
+}
+function drawDebug() {
+  if (!DEBUG || !player || state !== 'play') return;
+  ctx.save(); ctx.lineWidth = 1; ctx.strokeStyle = 'lime';
+  for (const c of playerCircles()) { ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, 6.283); ctx.stroke(); }
+  ctx.strokeStyle = 'red';
+  for (const o of obs) for (const c of obstacleCircles(o, H - (o.wy - cam))) { ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, 6.283); ctx.stroke(); }
+  ctx.restore();
+}
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  if (shakeT > 0) ctx.translate(rnd(-1, 1) * shakeT * 22 * U, rnd(-1, 1) * shakeT * 22 * U);
+  drawSky();
+  drawDecos();
+  if (state !== 'title') { drawWinds(); drawObstacles(); drawPlayer(); }
+  ctx.restore();
+  if (flashT > 0) { ctx.save(); ctx.globalAlpha = flashT / 0.14 * 0.22; ctx.fillStyle = '#fff8d0'; ctx.fillRect(0, 0, W, H); ctx.restore(); }
+  drawPaper();
+  if (state === 'title') drawTitle();
+  if (state === 'play') drawHUD();
+  if (state === 'pause') { drawHUD(); drawPause(); }
+  if (state === 'over') drawOver();
+  drawDebug();
+}
+
+/* ---------- loop ---------- */
+let last = 0;
+document.addEventListener('visibilitychange', () => { last = 0; if (document.hidden) pauseGame(); });
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (document.hidden) return;
+  const dt = last ? Math.min((ts - last) / 1000, 1 / 20) : 1 / 60;
+  last = ts;
+  update(dt); draw();
+}
+window.__game = { get state() { return state; }, get meters() { return meters(); }, start: () => startGame(), pause: () => pauseGame(),
+  setCam: v => { cam = v * U * 10; nextWy = cam + H; while (bannerIdx < BANNERS.length && BANNERS[bannerIdx][0] < v - 5) bannerIdx++; } };
+
+load().then(fontsReady).then(() => {
+  prepare(); resize();
+  document.getElementById('loading').remove();
+  requestAnimationFrame(frame);
+});
+})();
+</script>
+</body>
+</html>
