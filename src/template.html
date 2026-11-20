@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
@@ -12,16 +12,16 @@
 <meta name="apple-mobile-web-app-title" content="Balloon">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&text=/*FONTTEXT*/&display=block" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Gochi+Hand&display=block" rel="stylesheet">
 <style>
   html,body{margin:0;height:100%;background:#1a1640;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
   body{display:flex;align-items:center;justify-content:center}
   canvas{display:block;touch-action:none}
-  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#a9c8ff;font:18px "ZCOOL KuaiLe","Chalkboard SE",cursive;letter-spacing:2px}
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#a9c8ff;font:20px "Gochi Hand","Chalkboard SE",cursive;letter-spacing:1px}
 </style>
 </head>
 <body>
-<div id="loading">准备气球中…</div>
+<div id="loading">blowing up balloons…</div>
 <canvas id="c"></canvas>
 <script>
 const SRC = /*SPRITES*/;
@@ -30,8 +30,8 @@ const SRC = /*SPRITES*/;
 const DEBUG = /[?&]debug/.test(location.search);
 const cv = document.getElementById('c');
 const ctx = cv.getContext('2d');
-let W = 360, H = 640, U = 1, DPR = 1;
-const FONT = '"ZCOOL KuaiLe","Chalkboard SE","Comic Sans MS","PingFang SC",cursive';
+let W = 360, H = 640, U = 1, DPR = 1, VW = 360, OX = 0;
+const FONT = '"Gochi Hand","Chalkboard SE","Comic Sans MS",cursive';
 
 /* palette picked from the original drawings */
 const C = {
@@ -52,7 +52,7 @@ function load() {
 }
 function fontsReady() {
   const go = document.fonts && document.fonts.load
-    ? Promise.all([document.fonts.load('30px "ZCOOL KuaiLe"', '继续暂停最高新纪录换人物'), document.fonts.ready])
+    ? Promise.all([document.fonts.load('30px "Gochi Hand"', 'BEST PAUSED RESUME MENU NEW'), document.fonts.ready])
     : Promise.resolve();
   return Promise.race([go.catch(() => {}), new Promise(r => setTimeout(r, 2500))]);
 }
@@ -345,14 +345,26 @@ function sTick(freq, vol) {
 
 /* ---------- layout ---------- */
 function resize() {
-  const vw = window.innerWidth, vh = window.innerHeight;
-  W = Math.min(vw, Math.round(vh * 0.64)); H = vh; U = W / 360;
+  const vw = window.innerWidth, vh = window.innerHeight, oldU = U, oldH = H;
+  VW = vw; H = vh;
+  W = Math.min(vw, Math.round(vh * 0.68)); OX = Math.round((vw - W) / 2); U = W / 360;
   DPR = Math.min(window.devicePixelRatio || 1, 2.5);
-  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
-  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  cv.width = Math.round(VW * DPR); cv.height = Math.round(H * DPR);
+  cv.style.width = VW + 'px'; cv.style.height = H + 'px';
   stars = makeStars();
   if (GRAIN) bakeStatic();
-  if (player) player.s = charScale(player.ch);
+  if (player && CHARS.length && (U !== oldU || H !== oldH)) rescaleWorld(U / oldU);
+}
+// keep everything in place when the phone is rotated mid-game
+function rescaleWorld(k) {
+  cam *= k; nextWy *= k; nextDeco *= k; climb *= k;
+  for (const o of obs) { for (const f of ['x', 'wy', 's', 'vx', 'vy', 'bob', 'boltDx']) if (typeof o[f] === 'number') o[f] *= k; }
+  for (const d of decos) { d.x *= k; d.wy *= k; d.s *= k; d.drift *= k; }
+  for (const f of fx) { f.x *= k; f.y *= k; f.s *= k; f.vy *= k; }
+  parts = []; winds = [];
+  const p = player; p.x *= k; p.tx *= k; p.s = charScale(p.ch);
+  if (state === 'play' || state === 'pause') p.y = H * 0.64; else { p.y *= k; p.fvy = (p.fvy || 0) * k; }
+  if (state === 'play') pauseGame();
 }
 window.addEventListener('resize', resize);
 
@@ -390,7 +402,7 @@ let cam = 0, t = 0, playT = 0, climb = 0;
 let player = null, obs = [], decos = [], fx = [], parts = [], winds = [], stars = [];
 let nextWy = 0, nextDeco = 0, lastMeter = 0, windAcc = 0;
 let fallT = 0, overT = 0, newBest = false, shakeT = 0, flashT = 0, banner = null, bannerIdx = 0;
-const BANNERS = [[12, '小鸟出没！'], [55, '小心鸟屎！'], [200, '云会打雷哦'], [600, '飞进太空啦'], [1000, '一千米！好厉害'], [1500, '还在飞！']];
+const BANNERS = []; // no in-game hint banners
 const ZONES = [[15, 'bird_w1'], [200, 'cloud_dark'], [620, 'ball']];
 const TOPM = 1500;
 
@@ -455,7 +467,7 @@ function addDeco(wy) {
   const far = Math.random() < 0.55; // far clouds: smaller, softer, slower
   const par = far ? 0.32 : 0.55;
   wy = wy - cam * 0.32 + cam * par; // keep spawn just above screen whatever its parallax
-  decos.push({ img, wy, x: rnd(-0.1, 1.1) * W, s: W * (far ? rnd(0.2, 0.32) : rnd(0.32, 0.48)) / img.width, par,
+  decos.push({ img, wy, x: rnd(-OX - 0.1 * W, W + OX + 0.1 * W), s: W * (far ? rnd(0.2, 0.32) : rnd(0.32, 0.48)) / img.width, par,
     a: (m > 900 ? 0.45 : far ? rnd(0.45, 0.6) : rnd(0.6, 0.78)), far, flip: Math.random() < 0.5, drift: rnd(-6, 6) * U });
   decos.sort((a, b) => a.par - b.par);
 }
@@ -482,10 +494,12 @@ function titleLayout() {
   };
 }
 function overLayout() {
-  const ch = Math.min(H * 0.4, 310 * U), cy = H * 0.4;
-  const bi = IMG.btn_restart, bw = W * 0.52, bs = bw / bi.width;
-  return { card: R(W / 2, cy, W * 0.84, ch), btn: R(W / 2, cy + ch / 2 + 52 * U, bw, bi.height * bs), bs,
-    home: R(W / 2, cy + ch / 2 + 112 * U, 130 * U, 42 * U) };
+  // sized so it also fits a short landscape screen
+  const ch = Math.min(310 * U, Math.max(230 * U, H * 0.5)), cy = Math.min(H * 0.4, H - ch / 2 - 150 * U);
+  const bi = IMG.btn_restart, bw = W * 0.52, bs = bw / bi.width, bh = bi.height * bs;
+  const by = cy + ch / 2 + 16 * U + bh / 2;
+  return { card: R(W / 2, cy, W * 0.84, ch), btn: R(W / 2, by, bw, bh), bs,
+    home: R(W / 2, by + bh / 2 + 18 * U + 21 * U, 130 * U, 42 * U) };
 }
 function pauseLayout() {
   return { card: R(W / 2, H * 0.45, W * 0.72, 250 * U), go: R(W / 2, H * 0.45 + 10 * U, 160 * U, 50 * U),
@@ -527,7 +541,7 @@ const label = (txt, size, color, outline) => ui('tx' + txt + size + color + (out
 /* ---------- input ---------- */
 let drag = null;
 const keys = {};
-function localPt(e) { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+function localPt(e) { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left - OX, y: e.clientY - r.top }; }
 cv.addEventListener('pointerdown', e => {
   e.preventDefault();
   const p = localPt(e);
@@ -696,12 +710,12 @@ function die() {
 /* ---------- draw ---------- */
 function drawSky() {
   const sky = IMG.sky, m = cam / U / 10, p = clamp(m / 1300, 0, 1);
-  const s = W / sky.width, winH = Math.min(H / s, sky.height);
-  ctx.drawImage(sky, 0, (sky.height - winH) * (1 - p), sky.width, winH, 0, 0, W, H);
+  const s = VW / sky.width, winH = Math.min(H / s, sky.height);
+  ctx.drawImage(sky, 0, (sky.height - winH) * (1 - p), sky.width, winH, 0, 0, VW, H);
   const sa = clamp((m - 700) / 500, 0, 1);
   if (sa > 0) for (const st of stars) {
     const y = (st.y * H + cam * 0.06 * st.k) % H;
-    drawUI(UI.star, st.x * W, y, st.k * (0.8 + 0.25 * Math.sin(t * 2.2 + st.p)), sa * (0.5 + 0.45 * Math.sin(t * 1.7 + st.p)));
+    drawUI(UI.star, st.x * VW, y, st.k * (0.8 + 0.25 * Math.sin(t * 2.2 + st.p)), sa * (0.5 + 0.45 * Math.sin(t * 1.7 + st.p)));
   }
 }
 function drawDecos() {
@@ -764,19 +778,34 @@ function drawNumber(n, cx, cy, h, withM, alpha, ink) {
   });
   ctx.restore();
 }
+// wide screens: the play column is a page; the sky carries on either side under a paper veil
+function drawSides() {
+  if (OX < 2) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,252,243,0.62)';
+  ctx.fillRect(0, 0, OX, H); ctx.fillRect(OX + W, 0, VW - OX - W, H);
+  const edge = ui('edge' + H, () => {
+    const [c, g] = hiCanvas(10 * U, H);
+    g.strokeStyle = '#a3acd8'; g.lineCap = 'round'; g.lineWidth = 3 * U;
+    g.beginPath(); g.moveTo(5 * U, -4); for (let y = 0; y < H + 8; y += 10 * U) g.lineTo(5 * U + rnd(-0.8, 0.8) * U, y); g.stroke();
+    crayonize(g, c.width, c.height, 0.45); return c;
+  });
+  ctx.drawImage(edge, OX - 5 * U, 0, edge.cssW, edge.cssH);
+  ctx.drawImage(edge, OX + W - 5 * U, 0, edge.cssW, edge.cssH);
+  ctx.restore();
+}
 function drawPaper() {
   ctx.save();
   ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = 0.32;
-  ctx.fillStyle = ctx.createPattern(PAPER, 'repeat'); ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = ctx.createPattern(PAPER, 'repeat'); ctx.fillRect(0, 0, VW, H);
   ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
-  ctx.drawImage(VIGNETTE, 0, 0, W, H);
+  ctx.drawImage(VIGNETTE, 0, 0, VW, H);
   ctx.restore();
 }
 
 function drawTitle() {
   const L = titleLayout();
   drawSprite(IMG.logo, L.logo.x, L.logo.y + Math.sin(t * 1.6) * 4 * U, L.logo.s, false, Math.sin(t * 1.1) * 0.02);
-  drawUI(label('牵着气球，一直往上飞', 17 * U, C.ink, 'rgba(255,252,243,0.85)'), L.sub.x, L.sub.y);
   L.cards.forEach((r, i) => {
     const sel = i === charIdx, ch = CHARS[i];
     const card = ui('card' + i + sel, () => crayonShape(r.w, r.h, { fill: sel ? C.paper : 'rgba(255,252,243,0.62)', hatch: sel ? '#ffd8ea' : C.paperHatch, hatchA: 0.6, gap: 6 * U,
@@ -790,7 +819,7 @@ function drawTitle() {
   drawSprite(IMG.btn_start, L.btn.x, L.btn.y + Math.sin(t * 3) * 2 * U, L.bs);
   if (best > 0) {
     drawUI(ui('bestpill', () => pill(L.best.w, L.best.h, 'rgba(255,252,243,0.85)', C.paperHatch, 31)), L.best.x, L.best.y);
-    const lb = label('最高', 15 * U, C.ink), nw = numberWidth(best, 22 * U, true), tot = lb.cssW * 0.8 + nw;
+    const lb = label('BEST', 17 * U, C.ink), nw = numberWidth(best, 22 * U, true), tot = lb.cssW * 0.8 + nw;
     drawUI(lb, L.best.x - tot / 2 + lb.cssW * 0.4, L.best.y - 1 * U);
     drawNumber(best, L.best.x - tot / 2 + lb.cssW * 0.8 + nw / 2, L.best.y, 22 * U, true, 1, true);
   }
@@ -826,36 +855,37 @@ function drawAltBar() {
   drawSprite(b, x - 2 * U, yAt(meters()) - 8 * U, s, false, Math.sin(t * 2) * 0.1, 1, 'raw');
 }
 function drawPause() {
-  ctx.save(); ctx.fillStyle = 'rgba(31,36,86,0.35)'; ctx.fillRect(0, 0, W, H); ctx.restore();
+  ctx.save(); ctx.fillStyle = 'rgba(31,36,86,0.35)'; ctx.fillRect(-OX, 0, VW, H); ctx.restore();
   const L = pauseLayout();
   drawUI(ui('pausecard', () => paperCard(L.card.w, L.card.h, 51)), L.card.x, L.card.y);
-  drawUI(label('暂停一下', 30 * U, C.purple), W / 2, L.card.y - 78 * U);
-  drawUI(textPill('继续', L.go.w, L.go.h, C.purple, '#7a5ab8', 61), L.go.x, L.go.y);
-  drawUI(textPill('回主页', L.home.w, L.home.h, C.steel, '#8fb1cc', 62), L.home.x, L.home.y);
+  drawUI(label('PAUSED', 34 * U, C.purple), W / 2, L.card.y - 78 * U);
+  drawUI(textPill('RESUME', L.go.w, L.go.h, C.purple, '#7a5ab8', 61), L.go.x, L.go.y);
+  drawUI(textPill('MENU', L.home.w, L.home.h, C.steel, '#8fb1cc', 62), L.home.x, L.home.y);
   drawUI(iconBtn(muted ? 'mute' : 'sound'), L.sound.x, L.sound.y);
 }
 function drawOver() {
   const a = clamp(overT / 0.4, 0, 1), L = overLayout(), ease = 1 - Math.pow(1 - a, 3);
-  ctx.save(); ctx.globalAlpha = a * 0.3; ctx.fillStyle = C.navy; ctx.fillRect(0, 0, W, H); ctx.restore();
+  ctx.save(); ctx.globalAlpha = a * 0.3; ctx.fillStyle = C.navy; ctx.fillRect(-OX, 0, VW, H); ctx.restore();
   const cy = L.card.y + (1 - ease) * 40 * U, top = cy - L.card.h / 2;
   drawUI(ui('overcard', () => paperCard(L.card.w, L.card.h, 71)), L.card.x, cy, 1, a);
-  drawSprite(IMG.gameover, W / 2, top + L.card.h * 0.2, (W * 0.5) / IMG.gameover.width, false, Math.sin(t * 1.5) * 0.03, a);
-  drawNumber(lastMeter, W / 2, top + L.card.h * 0.52, 54 * U, true, a, true);
+  const go = IMG.gameover, gs = Math.min((W * 0.5) / go.width, (L.card.h * 0.3) / go.height);
+  drawSprite(go, W / 2, top + L.card.h * 0.22, gs, false, Math.sin(t * 1.5) * 0.03, a);
+  drawNumber(lastMeter, W / 2, top + L.card.h * 0.55, Math.min(54 * U, L.card.h * 0.2), true, a, true);
   if (newBest) {
     const r = ui('nb', () => pill(150 * U, 38 * U, C.pink, '#f39ac0', 81));
     drawUI(r, W / 2, top + L.card.h * 0.8, 1 + Math.sin(t * 5) * 0.03, a);
-    drawUI(label('新纪录！', 20 * U, '#fffaf2'), W / 2, top + L.card.h * 0.8 - 2 * U, 1, a);
+    drawUI(label('NEW BEST!', 22 * U, '#fffaf2'), W / 2, top + L.card.h * 0.8 - 2 * U, 1, a);
     drawUI(UI.starBig, W / 2 - 86 * U, top + L.card.h * 0.8, 0.9 + Math.sin(t * 4) * 0.1, a);
     drawUI(UI.starBig, W / 2 + 86 * U, top + L.card.h * 0.8, 0.9 + Math.sin(t * 4 + 1) * 0.1, a);
   } else if (best > 0) {
-    const lb = label('最高', 16 * U, C.ink), nw = numberWidth(best, 24 * U, true), tot = lb.cssW * 0.8 + nw, y = top + L.card.h * 0.8;
+    const lb = label('BEST', 18 * U, C.ink), nw = numberWidth(best, 24 * U, true), tot = lb.cssW * 0.8 + nw, y = top + L.card.h * 0.8;
     drawUI(lb, W / 2 - tot / 2 + lb.cssW * 0.4, y - 1 * U, 1, a);
     drawNumber(best, W / 2 - tot / 2 + lb.cssW * 0.8 + nw / 2, y, 24 * U, true, a, true);
   }
   if (overT > 0.6) {
     const b = clamp((overT - 0.6) / 0.3, 0, 1);
     drawSprite(IMG.btn_restart, L.btn.x, L.btn.y + Math.sin(t * 3) * 2 * U, L.bs, false, 0, b);
-    drawUI(textPill('换人物', L.home.w, L.home.h, 'rgba(255,252,243,0.92)', C.paperHatch, 63, C.ink), L.home.x, L.home.y, 1, b);
+    drawUI(textPill('MENU', L.home.w, L.home.h, 'rgba(255,252,243,0.92)', C.paperHatch, 63, C.ink), L.home.x, L.home.y, 1, b);
   }
 }
 function drawDebug() {
@@ -868,15 +898,18 @@ function drawDebug() {
 }
 function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.clearRect(0, 0, W, H);
+  ctx.clearRect(0, 0, VW, H);
   ctx.save();
   if (shakeT > 0) ctx.translate(rnd(-1, 1) * shakeT * 22 * U, rnd(-1, 1) * shakeT * 22 * U);
   drawSky();
+  ctx.translate(OX, 0);
   drawDecos();
   if (state !== 'title') { drawWinds(); drawObstacles(); drawPlayer(); }
   ctx.restore();
-  if (flashT > 0) { ctx.save(); ctx.globalAlpha = flashT / 0.14 * 0.22; ctx.fillStyle = '#fff8d0'; ctx.fillRect(0, 0, W, H); ctx.restore(); }
+  drawSides();
+  if (flashT > 0) { ctx.save(); ctx.globalAlpha = flashT / 0.14 * 0.22; ctx.fillStyle = '#fff8d0'; ctx.fillRect(0, 0, VW, H); ctx.restore(); }
   drawPaper();
+  ctx.translate(OX, 0);
   if (state === 'title') drawTitle();
   if (state === 'play') drawHUD();
   if (state === 'pause') { drawHUD(); drawPause(); }
