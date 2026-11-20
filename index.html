@@ -303,8 +303,26 @@ function bakeStatic() {
   UI.star = crayonStar(14 * U, '#fff8d8');
   UI.starBig = crayonStar(26 * U, '#ffe86e');
   UI.wind = crayonLine(46 * U, 2.4 * U, 'rgba(255,255,255,0.9)');
+  UI.sparkle = crayonStar(18 * U, '#ffd84a');
+  UI.moon = makeMoon(MOON_R());
+  UI.moonIcon = makeMoon(11 * U);
   UI.dots = [];
   C.balloon.forEach((col, i) => { UI.dots.push(crayonDot(4 * U, col, i * 13 + 1)); UI.dots.push(crayonDot(6 * U, col, i * 13 + 2)); });
+}
+
+const MOON_R = () => 118 * U;
+function makeMoon(r) { // crayon moon: scribbled fill, soft rim, a few craters, faint glow
+  const pad = r * 0.45, [c, x] = hiCanvas(r * 2 + pad * 2, r * 2 + pad * 2), m = c.cssW / 2;
+  const g = x.createRadialGradient(m, m, r * 0.9, m, m, r + pad);
+  g.addColorStop(0, 'rgba(255,244,190,0.45)'); g.addColorStop(1, 'rgba(255,244,190,0)');
+  x.fillStyle = g; x.fillRect(0, 0, c.cssW, c.cssH);
+  const body = crayonShape(r * 2, r * 2, { fill: '#fbefb0', hatch: '#fffbe2', hatchA: 0.7, gap: Math.max(3, r * 0.06), stroke: '#e6c766', strokeW: Math.max(1.5, r * 0.035), r, amp: r * 0.02, grain: 0.3, seed: 91 });
+  x.drawImage(body, m - body.cssW / 2, m - body.cssH / 2, body.cssW, body.cssH);
+  [[-0.35, -0.25, 0.2], [0.3, 0.2, 0.26], [0.05, -0.5, 0.11], [-0.25, 0.42, 0.14], [0.5, -0.25, 0.09]].forEach(([dx, dy, k], i) => {
+    const cr = crayonShape(r * k * 2, r * k * 2, { fill: '#efd98c', hatch: '#e2c56c', hatchA: 0.5, gap: Math.max(2, r * 0.04), r: r * k, amp: r * k * 0.08, grain: 0.35, seed: 100 + i });
+    x.drawImage(cr, m + dx * r - cr.cssW / 2, m + dy * r - cr.cssH / 2, cr.cssW, cr.cssH);
+  });
+  return c;
 }
 
 /* ---------- storage ---------- */
@@ -397,16 +415,30 @@ function hits(A, B) {
 /* ---------- game state ---------- */
 let state = 'title';          // title | play | pause | fall | over
 let charIdx = store.get('char', 0) | 0;
-let best = store.get('best', 0) | 0;
+let mode = store.get('mode', 'free') === 'daily' ? 'daily' : 'free';
+const today = new Date(), DAY = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+const DAY_SEED = +DAY.replace(/-/g, '');
+const bestKey = () => mode === 'daily' ? 'dbest_' + DAY : 'best';
+const ghostKey = () => mode === 'daily' ? 'dghost_' + DAY : 'ghost';
+let best = store.get(bestKey(), 0) | 0;
 let cam = 0, t = 0, playT = 0, climb = 0;
+// score = height + daring bonus; the run ends on the moon
+const MOON_M = 1400;
+let bonus = 0, combo = 0, lastNear = -9, floats = [], won = false, landT = 0, landFrom = null, resultH = 0, resultScore = 0, resultT = 0;
+let ghost = null, rec = [], toast = null;
+// seeded randomness for obstacles, so DAILY is the same course for everyone that day
+let RNG = Math.random;
+const srnd = (a, b) => a + RNG() * (b - a);
+const spick = a => a[(RNG() * a.length) | 0];
 let player = null, obs = [], decos = [], fx = [], parts = [], winds = [], stars = [];
 let nextWy = 0, nextDeco = 0, lastMeter = 0, windAcc = 0;
 let fallT = 0, overT = 0, newBest = false, shakeT = 0, flashT = 0, banner = null, bannerIdx = 0;
 const BANNERS = []; // no in-game hint banners
 const ZONES = [[15, 'bird_w1'], [200, 'cloud_dark'], [620, 'ball']];
-const TOPM = 1500;
+const TOPM = MOON_M;
 
 const meters = () => Math.floor(cam / U / 10);
+const score = () => meters() + bonus;
 function makeStars() {
   const s = [];
   for (let i = 0; i < 38; i++) s.push({ x: Math.random(), y: Math.random(), k: rnd(0.35, 1), p: Math.random() * 6 });
@@ -419,11 +451,17 @@ function reset() {
   const ch = CHARS[charIdx];
   player = { x: W / 2, tx: W / 2, y: H * 0.64, vx: 0, ch, s: charScale(ch) };
   nextWy = H + 160 * U; lastMeter = 0; newBest = false; shakeT = 0; flashT = 0; banner = null; bannerIdx = 0;
+  bonus = 0; combo = 0; lastNear = -9; floats = []; won = false; landT = 0; rec = []; toast = null;
+  RNG = mode === 'daily' ? mulberry(DAY_SEED) : Math.random;
+  best = store.get(bestKey(), 0) | 0;
+  ghost = store.get(ghostKey(), null);
+  if (ghost && (!ghost.d || !ghost.d.length)) ghost = null;
 }
 
 /* ---------- spawning ---------- */
 function spawnRow(wy) {
   const m = wy / U / 10, opts = [];
+  if (m > MOON_M - 110) return; // clear sky just under the moon
   if (m < 180) opts.push(['branch', m < 60 ? 6 : 3]);
   if (m < 120 && m > 30) opts.push(['branch2', 2]);
   if (m > 15) opts.push(['bird_w', 2]);
@@ -431,34 +469,34 @@ function spawnRow(wy) {
   if (m > 200) opts.push(['storm', m > 500 ? 3 : 2]);
   if (m > 620) opts.push(['meteor', m > 900 ? 3 : 1.5]);
   let tot = 0; for (const o of opts) tot += o[1];
-  let r = Math.random() * tot, kind = opts[0][0];
+  let r = RNG() * tot, kind = opts[0][0];
   for (const o of opts) { if ((r -= o[1]) < 0) { kind = o[0]; break; } }
-  if (kind === 'branch') addBranch(wy, Math.random() < 0.5 ? 'L' : 'R', rnd(0.36, 0.6));
-  else if (kind === 'branch2') { const a = rnd(0.24, 0.34); addBranch(wy, 'L', a); addBranch(wy + rnd(-20, 20) * U, 'R', 0.6 - a + rnd(-0.04, 0.02)); }
+  if (kind === 'branch') addBranch(wy, RNG() < 0.5 ? 'L' : 'R', srnd(0.36, 0.6));
+  else if (kind === 'branch2') { const a = srnd(0.24, 0.34); addBranch(wy, 'L', a); addBranch(wy + srnd(-20, 20) * U, 'R', 0.6 - a + srnd(-0.04, 0.02)); }
   else if (kind === 'bird_w' || kind === 'bird_b') addBird(wy, kind);
   else if (kind === 'storm') addStorm(wy);
-  else if (kind === 'meteor') addMeteor();
+  else if (kind === 'meteor') addMeteor(wy);
 }
 function addBranch(wy, side, frac) {
-  const n = 1 + ((Math.random() * 5) | 0), img = IMG['branch' + n];
+  const n = 1 + ((RNG() * 5) | 0), img = IMG['branch' + n];
   const len = W * frac, s = len / img.width, flip = side === 'R';
-  obs.push({ type: 'branch', img, hit: HIT['branch' + n], wy, x: side === 'L' ? len / 2 : W - len / 2, s, flip, rot: rnd(-0.08, 0.08) * (flip ? -1 : 1) });
+  obs.push({ type: 'branch', img, hit: HIT['branch' + n], wy, x: side === 'L' ? len / 2 : W - len / 2, s, flip, rot: srnd(-0.08, 0.08) * (flip ? -1 : 1) });
 }
 function addBird(wy, kind) {
-  const brown = kind === 'bird_b', dir = Math.random() < 0.5 ? 1 : -1;
+  const brown = kind === 'bird_b', dir = RNG() < 0.5 ? 1 : -1;
   const s = (brown ? 92 : 60) * U / (brown ? IMG.bird_b1.width : IMG.bird_w1.width);
-  const sp = (brown ? rnd(55, 105) : rnd(80, 150)) * U * (1 + Math.min(meters() / 1500, 0.6));
+  const sp = (brown ? srnd(55, 105) : srnd(80, 150)) * U * (1 + Math.min(meters() / 1500, 0.6));
   obs.push({ type: 'bird', brown, frames: brown ? [IMG.bird_b1, IMG.bird_b2] : [IMG.bird_w1, IMG.bird_w2],
     hit: brown ? HIT.bird_b : HIT.bird_w, wy, x: dir > 0 ? -60 * U : W + 60 * U, vx: dir * sp, s,
-    flip: dir > 0, ph: Math.random() * 6, dropped: !brown || Math.random() < 0.25, bob: rnd(4, 10) * U });
+    flip: dir > 0, ph: RNG() * 6, dropped: !brown || RNG() < 0.25, bob: srnd(4, 10) * U });
 }
 function addStorm(wy) {
-  const img = pick([IMG.cloud_blue, IMG.cloud_yellow, IMG.cloud_purple]), s = (W * rnd(0.4, 0.52)) / img.width, per = rnd(2.6, 3.8);
-  obs.push({ type: 'storm', img, wy, x: rnd(0.22, 0.78) * W, s, per, ph: rnd(0, per), boltDx: 0, striking: false, mode: 'calm' });
+  const img = spick([IMG.cloud_blue, IMG.cloud_yellow, IMG.cloud_purple]), s = (W * srnd(0.4, 0.52)) / img.width, per = srnd(2.6, 3.8);
+  obs.push({ type: 'storm', img, wy, x: srnd(0.22, 0.78) * W, s, per, ph: srnd(0, per), boltDx: 0, striking: false, mode: 'calm', strikeN: 0 });
 }
-function addMeteor() {
-  const img = IMG.ball, s = rnd(42, 60) * U / img.width;
-  obs.push({ type: 'meteor', img, wy: cam + H + 80 * U, x: rnd(0.12, 0.88) * W, vx: rnd(-50, 50) * U, vy: -rnd(110, 190) * U, s, rot: 0, vr: rnd(-3, 3) });
+function addMeteor(wy) {
+  const img = IMG.ball, s = srnd(42, 60) * U / img.width;
+  obs.push({ type: 'meteor', img, wy: Math.max(wy, cam + H + 60 * U), x: srnd(0.12, 0.88) * W, vx: srnd(-50, 50) * U, vy: -srnd(110, 190) * U, s, rot: 0, vr: srnd(-3, 3) });
 }
 function addPoop(x, wy) { obs.push({ type: 'poop', img: IMG.poop, x, wy, vy: -rnd(150, 200) * U, s: 28 * U / IMG.poop.width, rot: 0 }); }
 function addDeco(wy) {
@@ -487,19 +525,22 @@ function titleLayout() {
   return {
     logo: { x: W / 2, y: H * 0.15, s: (W * 0.76) / IMG.logo.width },
     sub: { x: W / 2, y: H * 0.15 + 74 * U },
-    cards: [R(W * 0.28, H * 0.46, cw, chh), R(W * 0.72, H * 0.46, cw, chh)],
-    btn: R(W / 2, H * 0.68, bw, bi.height * bs), bs,
-    best: R(W / 2, H * 0.68 + 66 * U, 150 * U, 40 * U),
+    cards: [R(W * 0.28, H * 0.44, cw, chh), R(W * 0.72, H * 0.44, cw, chh)],
+    modes: [R(W / 2 - 62 * U, H * 0.615, 112 * U, 36 * U), R(W / 2 + 62 * U, H * 0.615, 112 * U, 36 * U)],
+    btn: R(W / 2, H * 0.72, bw, bi.height * bs), bs,
+    best: R(W / 2, H * 0.72 + 60 * U, 150 * U, 40 * U),
     sound: R(W - 34 * U, 36 * U, 40 * U, 40 * U),
   };
 }
 function overLayout() {
   // sized so it also fits a short landscape screen
-  const ch = Math.min(310 * U, Math.max(230 * U, H * 0.5)), cy = Math.min(H * 0.4, H - ch / 2 - 150 * U);
+  let ch = Math.min(310 * U, Math.max(230 * U, H * 0.5)), cy = Math.min(H * 0.4, H - ch / 2 - 150 * U);
+  if (won) { ch *= 0.8; cy = H - ch / 2 - 150 * U; } // leave the moon scene visible above the card
   const bi = IMG.btn_restart, bw = W * 0.52, bs = bw / bi.width, bh = bi.height * bs;
   const by = cy + ch / 2 + 16 * U + bh / 2;
+  const hy = by + bh / 2 + 18 * U + 21 * U, two = mode === 'daily';
   return { card: R(W / 2, cy, W * 0.84, ch), btn: R(W / 2, by, bw, bh), bs,
-    home: R(W / 2, by + bh / 2 + 18 * U + 21 * U, 130 * U, 42 * U) };
+    home: R(two ? W / 2 - 68 * U : W / 2, hy, 124 * U, 42 * U), share: R(W / 2 + 68 * U, hy, 124 * U, 42 * U) };
 }
 function pauseLayout() {
   return { card: R(W / 2, H * 0.45, W * 0.72, 250 * U), go: R(W / 2, H * 0.45 + 10 * U, 160 * U, 50 * U),
@@ -548,6 +589,7 @@ cv.addEventListener('pointerdown', e => {
   initAudio();
   if (state === 'title') return titleTap(p);
   if (state === 'over') return overTap(p);
+  if (state === 'land') return;
   if (state === 'pause') return pauseTap(p);
   if (state === 'play') {
     if (inR(p, pauseBtn(), 6 * U)) return pauseGame();
@@ -577,6 +619,7 @@ function titleTap(p) {
   const L = titleLayout();
   if (inR(p, L.sound)) return toggleSound();
   L.cards.forEach((r, i) => { if (inR(p, r, 0)) { if (charIdx !== i) sTick(660); charIdx = i; store.set('char', i); } });
+  ['free', 'daily'].forEach((m, i) => { if (inR(p, L.modes[i], 4 * U) && mode !== m) { mode = m; store.set('mode', m); best = store.get(bestKey(), 0) | 0; sTick(600); } });
   if (inR(p, L.btn)) startGame();
 }
 function overTap(p) {
@@ -584,6 +627,15 @@ function overTap(p) {
   const L = overLayout();
   if (inR(p, L.btn)) startGame();
   else if (inR(p, L.home)) { state = 'title'; cam = 0; sTick(520); }
+  else if (mode === 'daily' && inR(p, L.share)) shareResult();
+}
+function shareResult() {
+  const txt = 'Balloon daily ' + DAY + ': ' + resultScore + ' points, ' + resultH + ' m' + (won ? ', reached the moon!' : '') + '\n' + location.href.split('#')[0];
+  const done = ok => { toast = { txt: ok ? 'COPIED!' : 'SHARE NOT AVAILABLE HERE', age: 0 }; };
+  try {
+    if (navigator.share) { navigator.share({ text: txt }).catch(() => {}); return; }
+    navigator.clipboard.writeText(txt).then(() => done(true), () => done(false));
+  } catch (e) { done(false); }
 }
 function pauseTap(p) {
   const L = pauseLayout();
@@ -610,11 +662,14 @@ function update(dt) {
     player.vx = (player.x - prevX) / Math.max(dt, 1e-4);
     while (nextWy < cam + H + 140 * U) {
       spawnRow(nextWy);
-      nextWy += rnd(150, 235) * U * Math.max(0.62, 1 - (nextWy / U / 10) / 1800);
+      nextWy += srnd(150, 235) * U * Math.max(0.62, 1 - (nextWy / U / 10) / 1800);
     }
     const mm = meters();
     if (Math.floor(mm / 100) > Math.floor(lastMeter / 100)) sTick(880 + Math.min(mm, 2000) / 5, 0.05);
     lastMeter = mm;
+    // ghost recording: height + x every 0.1 s
+    while (rec.length * 0.1 <= playT) rec.push([Math.round(cam / U) / 10, Math.round(player.x / W * 1000) / 1000]);
+    if (cam >= MOON_M * 10 * U) startLanding();
     if (bannerIdx < BANNERS.length && mm >= BANNERS[bannerIdx][0]) { banner = { img: label(BANNERS[bannerIdx][1], 26 * U, C.pink, '#fffaf2'), age: 0 }; bannerIdx++; }
     // wind streaks sell the speed
     windAcc += dt * (climb / U) * 0.045;
@@ -623,10 +678,23 @@ function update(dt) {
     fallT += dt; climb *= Math.pow(0.05, dt); cam += climb * dt;
     player.fvy += 900 * U * dt; player.y += player.fvy * dt; player.rot += player.vr * dt;
     if (fallT > 1.5) { state = 'over'; overT = 0; }
+  } else if (state === 'land') {
+    landT += dt; climb *= Math.pow(0.03, dt); cam += climb * dt;
+    const mg = moonGeom(), k = 1 - Math.pow(1 - clamp(landT / 1.6, 0, 1), 3);
+    player.x = landFrom.x + (W / 2 - landFrom.x) * k;
+    player.y = landFrom.y + (mg.top + 14 * U - 61 * U - landFrom.y) * k;
+    if (landT - dt < 1.6 && landT >= 1.6) { // touchdown
+      for (let i = 0; i < 18; i++) { const a = Math.random() * 6.283, v = rnd(80, 240) * U; parts.push({ img: Math.random() < 0.5 ? UI.sparkle : pick(UI.dots), x: player.x, y: mg.top + 10 * U, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 120 * U, life: rnd(0.8, 1.4), age: 0 }); }
+      [660, 880, 1100, 1320].forEach((f, i) => setTimeout(() => sTick(f, 0.07), i * 110));
+    }
+    if (landT > 2.6) { state = 'over'; overT = 0; }
   } else if (state === 'over') overT += dt;
   else if (state === 'title') { cam += 18 * U * dt; if (cam > 600 * U) cam = 0; }
 
   if (banner) { banner.age += dt; if (banner.age > 2.4) banner = null; }
+  for (const f of floats) { f.age += dt; f.y -= 50 * U * dt; }
+  floats = floats.filter(f => f.age < 1.1);
+  if (toast) { toast.age += dt; if (toast.age > 1.8) toast = null; }
   for (const w of winds) w.y += (climb * 1.7 + 120 * U) * w.k * dt;
   if (state !== 'play') for (const w of winds) w.a *= Math.pow(0.02, dt);
   winds = winds.filter(w => w.y < H + 60 * U && w.a > 0.02);
@@ -653,7 +721,7 @@ function update(dt) {
     else if (o.type === 'storm') {
       const q = (t + o.ph) % o.per, e = o.per - q, strike = e < 0.4;
       if (strike && !o.striking) {
-        o.boltDx = rnd(-0.22, 0.22) * o.img.width * o.s;
+        o.boltDx = rnd(-0.22, 0.22) * o.img.width * o.s; o.strikeN = (o.strikeN || 0) + 1;
         const sy = H - (o.wy - cam);
         if (sy > -40 * U && sy < H) { flashT = 0.14; if (state === 'play') sTick(180); }
       }
@@ -687,13 +755,50 @@ function obstacleCircles(o, sy) {
   if (o.type === 'storm' && o.striking) { const b = boltGeom(o, sy); return worldCircles(HIT.bolt, IMG.bolt, b.x, b.y, b.s, false, 1.1); }
   return [];
 }
+function gapBetween(A, B) {
+  let g = Infinity;
+  for (const a of A) for (const b of B) g = Math.min(g, Math.hypot(a.x - b.x, a.y - b.y) - a.r - b.r);
+  return g;
+}
 function collide() {
   const P = playerCircles(), ph = player.ch.frames[0].height * player.s;
   for (const o of obs) {
     const sy = H - (o.wy - cam);
     if (Math.abs(sy - player.y) > ph / 2 + 220 * U) continue;
-    if (hits(P, obstacleCircles(o, sy))) { die(); return; }
+    const B = obstacleCircles(o, sy);
+    if (!B.length) continue;
+    const g = gapBetween(P, B);
+    if (g < 0) { die(); return; }
+    // a close shave: within a finger's width but no touch
+    const key = o.type === 'storm' ? o.strikeN : 1;
+    if (g < 15 * U && o.near !== key) { o.near = key; nearMiss(o, B); }
   }
+}
+function nearMiss(o, B) {
+  combo = t - lastNear < 3 ? combo + 1 : 1; lastNear = t;
+  const pts = 5 * combo; bonus += pts;
+  let cx = 0, cy = 0; for (const b of B) { cx += b.x; cy += b.y; } cx /= B.length; cy /= B.length;
+  const mx = (cx + player.x) / 2, my = (cy + player.y) / 2;
+  floats.push({ img: label('+' + pts, (combo > 2 ? 30 : 24) * U, C.pink, '#fffaf2'), x: player.x + (cx > player.x ? -40 : 40) * U, y: player.y - 70 * U, age: 0 });
+  if (combo > 1) floats.push({ img: label('x' + combo, 22 * U, C.purple, '#fffaf2'), x: player.x + (cx > player.x ? -44 : 44) * U, y: player.y - 40 * U, age: -0.05 });
+  for (let i = 0; i < 5 + combo; i++) { const a = Math.random() * 6.283, v = rnd(60, 160) * U; parts.push({ img: UI.sparkle, x: mx, y: my, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 80 * U, life: rnd(0.5, 0.9), age: 0 }); }
+  sTick(820 + Math.min(combo, 8) * 90, 0.06);
+}
+function startLanding() {
+  state = 'land'; landT = 0; won = true; drag = null;
+  landFrom = { x: player.x, y: player.y };
+  bonus += 300;
+  floats.push({ img: label('+300', 32 * U, C.pink, '#fffaf2'), x: W / 2, y: H * 0.5, age: 0 });
+  finishRun();
+}
+function finishRun() {
+  resultH = meters(); resultScore = score(); resultT = playT;
+  if (resultScore > best) { best = resultScore; newBest = true; store.set(bestKey(), best); }
+  // keep the better run as the ghost: reaching the moon beats not; faster moon beats slower; otherwise higher wins
+  const g = store.get(ghostKey(), null), h = cam / U / 10;
+  const better = !g || (won && (!g.w || playT < g.t)) || (!won && !g.w && h > g.h);
+  if (better && rec.length > 5) store.set(ghostKey(), { c: charIdx, h: Math.round(h * 10) / 10, w: won, t: Math.round(playT * 10) / 10, d: rec });
+  if (mode === 'daily') { try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (/^balloon_d(ghost|best)_/.test(k) && !k.endsWith(DAY)) localStorage.removeItem(k); } } catch (e) {} }
 }
 function die() {
   sPop(); state = 'fall'; fallT = 0; shakeT = 0.35;
@@ -703,8 +808,8 @@ function die() {
   burst(p.x, by, 16, 220);
   p.fvy = -160 * U; p.rot = 0; p.vr = (Math.random() < 0.5 ? -1 : 1) * rnd(3, 5);
   p.y += img.height * p.s * 0.22;
-  const m = meters();
-  if (m > best) { best = m; newBest = true; store.set('best', best); }
+  won = false;
+  finishRun();
 }
 
 /* ---------- draw ---------- */
@@ -746,19 +851,46 @@ function drawObstacles() {
 }
 function drawPlayer() {
   const p = player, ch = p.ch;
-  if (state === 'play' || state === 'pause') {
+  if (state === 'play' || state === 'pause' || state === 'land' || (state === 'over' && won)) {
     const f = ch.frames[(t * 3 | 0) % ch.frames.length];
-    const rot = clamp(p.vx * 0.0006 / U, -0.22, 0.22) + (ch.sway ? Math.sin(t * 2.2) * 0.05 : 0);
+    const rot = state === 'play' ? clamp(p.vx * 0.0006 / U, -0.22, 0.22) + (ch.sway ? Math.sin(t * 2.2) * 0.05 : 0) : Math.sin(t * 2) * 0.04;
     ctx.save();
     ctx.translate(p.x, p.y); ctx.rotate(-rot); ctx.translate(-p.x, -p.y);
     drawSprite(f, p.x, p.y + Math.sin(t * 2.6) * 3 * U, p.s);
     ctx.restore();
-  } else if (state === 'fall' || state === 'over') {
+  } else if (state === 'fall' || (state === 'over' && !won)) {
     const f = ch.fall[(t * 6 | 0) % ch.fall.length];
     if (p.y < H + 200 * U) drawSprite(f, p.x, p.y, ch.id === 'kid' ? p.s * 1.05 : p.s * 0.95, false, p.rot);
   }
   for (const f of fx) drawSprite(f.img, f.x, f.y, f.s, false, f.rot);
   for (const q of parts) drawUI(q.img, q.x, q.y, 1, clamp(1 - q.age / q.life, 0, 1));
+}
+function moonGeom() {
+  const r = MOON_R(), cy = (H * 0.64 - 61 * U) - r * 0.9 - (MOON_M * 10 * U - cam);
+  return { x: W / 2, y: cy, r, top: cy - r * 0.96 };
+}
+function drawMoon() {
+  const g = moonGeom();
+  if (g.y < -g.r * 1.6 || g.y > H + g.r * 1.6) return;
+  drawUI(UI.moon, g.x, g.y + Math.sin(t * 0.8) * 2 * U);
+}
+function ghostAt(time) {
+  if (!ghost) return null;
+  const d = ghost.d, i = time / 0.1, i0 = Math.floor(i);
+  if (i0 >= d.length - 1) return null;
+  const f = i - i0, a = d[i0], b = d[i0 + 1];
+  return { h: a[0] + (b[0] - a[0]) * f, x: (a[1] + (b[1] - a[1]) * f) * W };
+}
+function drawGhost() {
+  if (!ghost || !(state === 'play' || state === 'pause')) return;
+  const g = ghostAt(playT); if (!g) return;
+  const y = player.y - (g.h - cam / U / 10) * 10 * U;
+  if (y < -80 * U || y > H + 80 * U) return;
+  const ch = CHARS[ghost.c] || CHARS[0], f = ch.frames[(t * 3 | 0) % ch.frames.length];
+  drawSprite(f, g.x, y + Math.sin(t * 2.6 + 1) * 3 * U, charScale(ch), false, 0, 0.3, 'raw');
+}
+function drawFloats() {
+  for (const f of floats) { if (f.age < 0) continue; const k = f.age < 0.15 ? 0.7 + f.age * 2 : 1; drawUI(f.img, f.x, f.y, k, clamp((1.1 - f.age) / 0.4, 0, 1)); }
 }
 function drawWinds() { for (const w of winds) drawUI(UI.wind, w.x, w.y, w.k, w.a); }
 function numberWidth(n, h, withM) {
@@ -782,7 +914,10 @@ function drawNumber(n, cx, cy, h, withM, alpha, ink) {
 function drawSides() {
   if (OX < 2) return;
   ctx.save();
-  ctx.fillStyle = 'rgba(255,252,243,0.62)';
+  const night = clamp((cam / U / 10 - 500) / 700, 0, 1); // cream veil by day, ink-blue veil at night
+  ctx.fillStyle = 'rgba(255,252,243,' + (0.62 * (1 - night)) + ')';
+  ctx.fillRect(0, 0, OX, H); ctx.fillRect(OX + W, 0, VW - OX - W, H);
+  ctx.fillStyle = 'rgba(14,12,42,' + (0.5 * night) + ')';
   ctx.fillRect(0, 0, OX, H); ctx.fillRect(OX + W, 0, VW - OX - W, H);
   const edge = ui('edge' + H, () => {
     const [c, g] = hiCanvas(10 * U, H);
@@ -816,20 +951,27 @@ function drawTitle() {
     drawSprite(im, r.x, r.y + lift + Math.sin(t * 2 + i * 2) * 3 * U, s, false, Math.sin(t * 1.8 + i) * 0.05, sel ? 1 : 0.55);
     if (sel) drawUI(UI.starBig, r.x + r.w / 2 - 10 * U, r.y - r.h / 2 + 8 * U + lift, 1 + Math.sin(t * 4) * 0.08, 1);
   });
+  [['free', 'FREE FLY'], ['daily', 'DAILY']].forEach(([m, txt], i) => {
+    const r = L.modes[i], on = mode === m;
+    const pc = on ? textPill(txt, r.w, r.h, C.purple, '#7a5ab8', 71 + i) : textPill(txt, r.w, r.h, 'rgba(255,252,243,0.88)', C.paperHatch, 73 + i, C.ink);
+    drawUI(pc, r.x, r.y + (on ? Math.sin(t * 3) * 1.5 * U : 0), on ? 1.04 : 0.94, on ? 1 : 0.85);
+  });
   drawSprite(IMG.btn_start, L.btn.x, L.btn.y + Math.sin(t * 3) * 2 * U, L.bs);
   if (best > 0) {
     drawUI(ui('bestpill', () => pill(L.best.w, L.best.h, 'rgba(255,252,243,0.85)', C.paperHatch, 31)), L.best.x, L.best.y);
-    const lb = label('BEST', 17 * U, C.ink), nw = numberWidth(best, 22 * U, true), tot = lb.cssW * 0.8 + nw;
+    const lb = label(mode === 'daily' ? 'TODAY' : 'BEST', 17 * U, C.ink), nw = numberWidth(best, 22 * U, false), tot = lb.cssW * 0.8 + nw;
     drawUI(lb, L.best.x - tot / 2 + lb.cssW * 0.4, L.best.y - 1 * U);
-    drawNumber(best, L.best.x - tot / 2 + lb.cssW * 0.8 + nw / 2, L.best.y, 22 * U, true, 1, true);
+    drawNumber(best, L.best.x - tot / 2 + lb.cssW * 0.8 + nw / 2, L.best.y, 22 * U, false, 1, true);
   }
   drawUI(iconBtn(muted ? 'mute' : 'sound'), L.sound.x, L.sound.y);
 }
 function drawHUD() {
-  const m = meters(), w = numberWidth(m, 30 * U, true) + 34 * U, y = 44 * U;
-  const p = ui('hud' + String(m).length, () => pill(w, 46 * U, 'rgba(255,252,243,0.9)', C.paperHatch, 41));
+  const sc = state === 'land' ? resultScore : score(), nw = numberWidth(sc, 30 * U, false), w = nw + 64 * U, y = 44 * U;
+  const p = ui('hud' + String(sc).length, () => pill(w, 46 * U, 'rgba(255,252,243,0.9)', C.paperHatch, 41));
   drawUI(p, W / 2, y);
-  drawNumber(m, W / 2, y, 30 * U, true, 1, true);
+  drawUI(UI.sparkle, W / 2 - nw / 2 - 12 * U, y, 1.15);
+  drawNumber(sc, W / 2 + 10 * U, y, 30 * U, false, 1, true);
+  if (combo > 1 && t - lastNear < 3) drawUI(label('x' + combo, 22 * U, C.purple, '#fffaf2'), W / 2 + w / 2 + 14 * U, y + 2 * U, 1, clamp((3 - (t - lastNear)) / 0.6, 0, 1));
   drawUI(iconBtn('pause'), pauseBtn().x, pauseBtn().y);
   drawAltBar();
   if (banner) {
@@ -850,7 +992,9 @@ function drawAltBar() {
     const im = IMG[n], s = (n === 'branch1' ? 26 : 22) * U / Math.max(im.width, im.height);
     drawSprite(im, x - 6 * U, yAt(m), s, n === 'bird_w1', 0, meters() >= m ? 1 : 0.55, 'raw');
   }
-  if (best > 0) { ctx.save(); ctx.strokeStyle = C.pink; ctx.lineWidth = 2.4 * U; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(x - 7 * U, yAt(best)); ctx.lineTo(x + 7 * U, yAt(best)); ctx.stroke(); ctx.restore(); }
+  drawUI(UI.moonIcon, x - 4 * U, top - 4 * U, 1);
+  const g = ghostAt(playT);
+  if (g) { const gb = (CHARS[ghost.c] || CHARS[0]).balloons; drawSprite(gb, x - 2 * U, yAt(g.h) - 8 * U, 26 * U / gb.height, false, 0, 0.4, 'raw'); }
   const b = player.ch.balloons, s = 30 * U / b.height;
   drawSprite(b, x - 2 * U, yAt(meters()) - 8 * U, s, false, Math.sin(t * 2) * 0.1, 1, 'raw');
 }
@@ -865,27 +1009,45 @@ function drawPause() {
 }
 function drawOver() {
   const a = clamp(overT / 0.4, 0, 1), L = overLayout(), ease = 1 - Math.pow(1 - a, 3);
-  ctx.save(); ctx.globalAlpha = a * 0.3; ctx.fillStyle = C.navy; ctx.fillRect(-OX, 0, VW, H); ctx.restore();
-  const cy = L.card.y + (1 - ease) * 40 * U, top = cy - L.card.h / 2;
-  drawUI(ui('overcard', () => paperCard(L.card.w, L.card.h, 71)), L.card.x, cy, 1, a);
-  const go = IMG.gameover, gs = Math.min((W * 0.5) / go.width, (L.card.h * 0.3) / go.height);
-  drawSprite(go, W / 2, top + L.card.h * 0.22, gs, false, Math.sin(t * 1.5) * 0.03, a);
-  drawNumber(lastMeter, W / 2, top + L.card.h * 0.55, Math.min(54 * U, L.card.h * 0.2), true, a, true);
+  ctx.save(); ctx.globalAlpha = a * (won ? 0.18 : 0.3); ctx.fillStyle = C.navy; ctx.fillRect(-OX, 0, VW, H); ctx.restore();
+  const cy = L.card.y + (1 - ease) * 40 * U, top = cy - L.card.h / 2, ch = L.card.h;
+  drawUI(ui('overcard', () => paperCard(L.card.w, ch, 71)), L.card.x, cy, 1, a);
+  if (won) {
+    const tl = label('TO THE MOON!', 40 * U, C.pink), fit = Math.min(1, (L.card.w * 0.8) / tl.cssW, (ch * 0.2) / tl.cssH);
+    drawUI(tl, W / 2, top + ch * 0.16, fit * (1 + Math.sin(t * 3) * 0.02), a);
+  } else {
+    const go = IMG.gameover, gs = Math.min((W * 0.46) / go.width, (ch * 0.26) / go.height);
+    drawSprite(go, W / 2, top + ch * 0.17, gs, false, Math.sin(t * 1.5) * 0.03, a);
+  }
+  // score with a star, then height (and time on the moon)
+  const sh = Math.min(50 * U, ch * 0.18), nw = numberWidth(resultScore, sh, false);
+  drawUI(UI.sparkle, W / 2 - nw / 2 - 16 * U, top + ch * 0.42, 1.5, a);
+  drawNumber(resultScore, W / 2 + 12 * U, top + ch * 0.42, sh, false, a, true);
+  const hh = Math.min(22 * U, ch * 0.08);
+  if (won) {
+    const ts = Math.floor(resultT / 60) + ':' + String(Math.floor(resultT % 60)).padStart(2, '0');
+    drawUI(label('TIME ' + ts, hh * 1.05, C.ink), W / 2, top + ch * 0.6, 1, a);
+  } else drawNumber(resultH, W / 2, top + ch * 0.6, hh, true, a, true);
+  const by = top + ch * 0.81;
   if (newBest) {
     const r = ui('nb', () => pill(150 * U, 38 * U, C.pink, '#f39ac0', 81));
-    drawUI(r, W / 2, top + L.card.h * 0.8, 1 + Math.sin(t * 5) * 0.03, a);
-    drawUI(label('NEW BEST!', 22 * U, '#fffaf2'), W / 2, top + L.card.h * 0.8 - 2 * U, 1, a);
-    drawUI(UI.starBig, W / 2 - 86 * U, top + L.card.h * 0.8, 0.9 + Math.sin(t * 4) * 0.1, a);
-    drawUI(UI.starBig, W / 2 + 86 * U, top + L.card.h * 0.8, 0.9 + Math.sin(t * 4 + 1) * 0.1, a);
+    drawUI(r, W / 2, by, 1 + Math.sin(t * 5) * 0.03, a);
+    drawUI(label('NEW BEST!', 22 * U, '#fffaf2'), W / 2, by - 2 * U, 1, a);
   } else if (best > 0) {
-    const lb = label('BEST', 18 * U, C.ink), nw = numberWidth(best, 24 * U, true), tot = lb.cssW * 0.8 + nw, y = top + L.card.h * 0.8;
-    drawUI(lb, W / 2 - tot / 2 + lb.cssW * 0.4, y - 1 * U, 1, a);
-    drawNumber(best, W / 2 - tot / 2 + lb.cssW * 0.8 + nw / 2, y, 24 * U, true, a, true);
+    const lb = label(mode === 'daily' ? 'TODAY' : 'BEST', 18 * U, C.ink), nw2 = numberWidth(best, 24 * U, false), tot = lb.cssW * 0.8 + nw2;
+    drawUI(lb, W / 2 - tot / 2 + lb.cssW * 0.4, by - 1 * U, 1, a);
+    drawNumber(best, W / 2 - tot / 2 + lb.cssW * 0.8 + nw2 / 2, by, 24 * U, false, a, true);
   }
   if (overT > 0.6) {
     const b = clamp((overT - 0.6) / 0.3, 0, 1);
     drawSprite(IMG.btn_restart, L.btn.x, L.btn.y + Math.sin(t * 3) * 2 * U, L.bs, false, 0, b);
     drawUI(textPill('MENU', L.home.w, L.home.h, 'rgba(255,252,243,0.92)', C.paperHatch, 63, C.ink), L.home.x, L.home.y, 1, b);
+    if (mode === 'daily') drawUI(textPill('SHARE', L.share.w, L.share.h, C.pink, '#f39ac0', 64), L.share.x, L.share.y, 1, b);
+  }
+  if (toast) {
+    const tl = label(toast.txt, 18 * U, '#fffaf2'), tp = ui('toast' + toast.txt, () => pill(tl.cssW + 20 * U, 40 * U, C.purple, '#7a5ab8', 88));
+    const ta = clamp(Math.min(toast.age / 0.15, (1.8 - toast.age) / 0.3), 0, 1);
+    drawUI(tp, W / 2, H - 40 * U, 1, ta); drawUI(tl, W / 2, H - 42 * U, 1, ta);
   }
 }
 function drawDebug() {
@@ -904,14 +1066,14 @@ function draw() {
   drawSky();
   ctx.translate(OX, 0);
   drawDecos();
-  if (state !== 'title') { drawWinds(); drawObstacles(); drawPlayer(); }
+  if (state !== 'title') { drawWinds(); drawMoon(); drawObstacles(); drawGhost(); drawPlayer(); drawFloats(); }
   ctx.restore();
   drawSides();
   if (flashT > 0) { ctx.save(); ctx.globalAlpha = flashT / 0.14 * 0.22; ctx.fillStyle = '#fff8d0'; ctx.fillRect(0, 0, VW, H); ctx.restore(); }
   drawPaper();
   ctx.translate(OX, 0);
   if (state === 'title') drawTitle();
-  if (state === 'play') drawHUD();
+  if (state === 'play' || state === 'land') drawHUD();
   if (state === 'pause') { drawHUD(); drawPause(); }
   if (state === 'over') drawOver();
   drawDebug();
@@ -927,7 +1089,8 @@ function frame(ts) {
   last = ts;
   update(dt); draw();
 }
-window.__game = { get state() { return state; }, get meters() { return meters(); }, start: () => startGame(), pause: () => pauseGame(),
+window.__game = { get state() { return state; }, get meters() { return meters(); }, get score() { return score(); }, get combo() { return combo; },
+  get ghost() { return !!ghost; }, setMode: m => { mode = m; }, start: () => startGame(), pause: () => pauseGame(),
   setCam: v => { cam = v * U * 10; nextWy = cam + H; while (bannerIdx < BANNERS.length && BANNERS[bannerIdx][0] < v - 5) bannerIdx++; } };
 
 load().then(fontsReady).then(() => {
